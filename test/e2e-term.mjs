@@ -53,6 +53,32 @@ await page.evaluate(() => navigator.clipboard.writeText('echo pasted_$((1+1))'))
 await page.keyboard.press('Control+Shift+v'); await page.waitForTimeout(200); await page.keyboard.press('Enter');
 await until(() => /pasted_2/.test(__kijo.term()[0].text), null, 5000);
 assert.ok(![...await q(() => [...__kijo.store.series.keys()])].some(k => /pasted/.test(k)), 'pasted shell text is not injected as telemetry');
+// mouse reporting: an app that asks for the mouse gets xterm SGR sequences; Shift would bypass
+await page.keyboard.type("printf '\\033[?1000h\\033[?1006h'; cat -v"); await page.keyboard.press('Enter');
+await until(() => __kijo.term()[0].text.includes('cat -v'), null, 3000); await page.waitForTimeout(300);
+const g = await q(() => __kijo.termGeo()[1]); assert.ok(g && g.cw > 3, 'terminal geometry is exposed');
+await page.mouse.click(g.x + 10 * g.cw + 2, g.y + 3 * g.lh + 2);
+await until(() => /\^\[\[<0;11;4M/.test(__kijo.term()[0].text) && /\^\[\[<0;11;4m/.test(__kijo.term()[0].text), null, 4000);
+await page.mouse.move(g.x + 5 * g.cw + 2, g.y + 2 * g.lh + 2); await page.mouse.wheel(0, -120);
+await until(() => /\^\[\[<64;6;3M/.test(__kijo.term()[0].text), null, 4000);
+await page.keyboard.press('Control+c'); await page.waitForTimeout(200);
+await page.keyboard.type("printf '\\033[?1000l\\033[?1006l'"); await page.keyboard.press('Enter'); await page.waitForTimeout(300);
+console.log('mouse reporting ok');
+// a second shell tile from the palette; closing it closes its PTY
+const ptyCount = async () => { const r = await fetch(`http://127.0.0.1:${d.port}/events`, { headers: { authorization: 'Bearer tok-e2e' } }); const rd = r.body.getReader(); const t = new TextDecoder().decode((await rd.read()).value); rd.cancel(); return JSON.parse(t.match(/^data: (.*)$/m)[1]).ptys.length; };
+assert.equal(await ptyCount(), 1);
+await page.keyboard.press('Control+]'); await until(() => __kijo.st.capture === null);
+await page.keyboard.press('/'); await page.keyboard.type('new shell'); await page.keyboard.press('Enter');
+await until(() => __kijo.st.terms.size === 2 && __kijo.st.capture !== null && __kijo.st.capture !== 1, null, 6000);
+await until(() => __kijo.term().some(t => t.tile !== 1 && /\w@\S+[$#]/.test(t.text)), null, 6000); // wait for its prompt
+await page.keyboard.type('echo second_$((3*3))'); await page.keyboard.press('Enter');
+await until(() => __kijo.term().some(t => t.tile !== 1 && /second_9/.test(t.text)), null, 5000);
+assert.equal(await ptyCount(), 2);
+await page.keyboard.press('Control+]'); await page.keyboard.press('x');
+await until(() => __kijo.st.terms.size === 1, null, 6000); await page.waitForTimeout(500);
+assert.equal(await ptyCount(), 1, 'closing the tile closed its shell');
+console.log('second shell opened and closed ok');
+await q(() => { __kijo.api.kijo_select(2, 2); }); await page.keyboard.press('Enter'); await until(() => __kijo.st.capture === 1);
 // exit -> status line, Enter restarts
 await page.keyboard.type('exit 5'); await page.keyboard.press('Enter');
 await until(() => __kijo.term()[0].exited === 5);

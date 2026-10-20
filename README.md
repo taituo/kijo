@@ -82,7 +82,7 @@ ssh -L 7501:127.0.0.1:7501 you@host 'node --input-type=module - --allow-shell' <
 scrollback, bracketed paste, DSR/DA replies). The PTY itself is a ~30-line `python3` helper spawned by kijod, so there is
 nothing to compile on the host. While a terminal is captured, keys go to the shell (`Ctrl+C` is SIGINT); `Ctrl+]`
 gives them back, `Ctrl+Shift+C` / `Ctrl+Shift+V` copy and paste, the wheel or `Shift+PgUp/PgDn` scrolls history.
-The PTY follows the tile's size. Shells survive a page reload (kijod replays recent output) and are reaped 10 s after the
+Programs that ask for the mouse (vim, tmux, htop, less) get it: xterm modes 1000/1002/1003 with SGR (1006) or legacy encoding, wheel included; hold Shift to select text instead, as in xterm. A new shell tile is one palette command away (`Terminal: new shell tile here`, up to 4 per kijod); closing the tile closes its shell. The PTY follows the tile's size. Shells survive a page reload (kijod replays recent output) and are reaped 10 s after the
 last browser detaches.
 
 **Status from inside the shell** uses OSC 7501, so any script or agent can colour its own tile:
@@ -94,7 +94,7 @@ printf '\033]7501;state=blocked;kind=permission\007'     # idle | working | bloc
 **Shell access is shell access.** It is off unless kijod starts with `--allow-shell` (or `KIJOD_SHELL=1`); otherwise
 `/pty/*` answers 403 and the tile says so. Anyone holding the token can then run commands as that user, so keep the
 loopback bind and the tunnel. At most 4 shells, 64 KB per input request. Limits: the glyph atlas is ASCII (box drawing
-folds to `+ - |`, other characters show as `?`), no mouse reporting yet, no wide (CJK) cells.
+folds to `+ - |`, other characters show as `?`), no wide (CJK) cells.
 
 The surface contract (what a tile, a surface and a scene node are, focus/capture, selection, status) is written down
 in [`docs/surface-contract.md`](docs/surface-contract.md).
@@ -217,14 +217,14 @@ there is no synthetic data in the app (tests use fixtures, labelled as such).
 Also real since 0.5: selectable/copyable text on every text surface, the VT emulator, PTY-backed terminal tiles
 through kijod (opt-in), OSC 7501 parsed from the PTY stream into tile status.
 
-Not built yet, and labelled as such in the UI: SSH/Herdr attach, mouse reporting, OTLP/protobuf, agent execution.
+Not built yet, and labelled as such in the UI: SSH/Herdr attach, OTLP/protobuf, agent execution.
 The agent tile is a local simulation. The terminal host's `P`/`O` still take over the terminal for a real shell/SSH session.
 
 ## Roadmap
 
 1. kijod adapters: declare capabilities; consequential actions need human approval. Today the relay collects and
    forwards and runs nothing, except the opt-in shell (`--allow-shell`), which is explicit shell access for the token holder.
-2. Terminal tiles: more than one shell per host, mouse reporting, Unicode glyph atlas, VT parsing in a worker, a scrollable log surface with search.
+2. Terminal tiles: Unicode glyph atlas (and wide cells), VT parsing in a worker, a scrollable log surface with search.
 3. Herdr adapter via `herdr terminal session observe|control` (NDJSON) and `herdr session list --json`.
 4. Hyprland adapter via `hyprctl` socket for mirroring real workspaces.
 5. Theme tokens (radius, gap, palette, motion) exposed as JSON; a full native host (spike exists: port the display-list builder, glyph atlas and the remaining ops); render-to-texture glass over tiles; an accessibility mirror of the text model.

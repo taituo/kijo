@@ -15,7 +15,7 @@ export class VT {
     this.cols = cols; this.rows = rows; this.maxBack = scrollback; this.onReply = onReply; this.onStatus = onStatus; this.onTitle = onTitle;
     this.main = this.grid(); this.altGrid = null; this.g = this.main; this.back = [];
     this.x = 0; this.y = 0; this.pend = false; this.saved = { x: 0, y: 0 }; this.top = 0; this.bot = rows - 1;
-    this.fg = -1; this.bg = -1; this.fl = 0; this.cursorVisible = true; this.appCursor = false; this.bracketed = false; this.wrap = true;
+    this.fg = -1; this.bg = -1; this.fl = 0; this.cursorVisible = true; this.appCursor = false; this.bracketed = false; this.mouse = 0; this.mouseSgr = false; this.altScroll = false; this.wrap = true;
     this.title = ''; this.state = 'g'; this.buf = ''; this.version = 0; this.dec = new TextDecoder();
   }
   grid() { return Array.from({ length: this.rows }, () => Array.from({ length: this.cols }, () => blank())); }
@@ -23,7 +23,14 @@ export class VT {
 
   resize(cols, rows) {
     cols = Math.max(2, Math.min(500, cols | 0)); rows = Math.max(1, Math.min(200, rows | 0)); if (cols === this.cols && rows === this.rows) return;
-    const fix = g => { while (g.length > rows) { const r = g.shift(); if (g === this.main) this.pushBack(r); } while (g.length < rows) g.push(Array.from({ length: cols }, () => blank())); for (const r of g) { while (r.length > cols) r.pop(); while (r.length < cols) r.push(blank()); } };
+    // Shrinking: drop rows below the cursor first (they are usually blank); only when the cursor itself would fall off
+    // the bottom do rows leave through the top, into scrollback. Content near the top of a fresh terminal must stay put.
+    const fix = g => {
+      const holder = g === this.g ? this : g === this.main ? this.savedMain || (this.savedMain = { x: 0, y: 0 }) : { y: 0 };
+      while (g.length > rows) { if (holder.y < g.length - 1) g.pop(); else { const r = g.shift(); if (g === this.main) this.pushBack(r); holder.y = Math.max(0, holder.y - 1); } }
+      while (g.length < rows) g.push(Array.from({ length: cols }, () => blank()));
+      for (const r of g) { while (r.length > cols) r.pop(); while (r.length < cols) r.push(blank()); }
+    };
     this.cols = cols; this.rows = rows; fix(this.main); if (this.altGrid) fix(this.altGrid);
     this.y = Math.min(this.y, rows - 1); this.x = Math.min(this.x, cols - 1); this.top = 0; this.bot = rows - 1; this.pend = false; this.version++;
   }
@@ -154,6 +161,8 @@ export class VT {
         for (const m of p) {
           if (m === 25) this.cursorVisible = on; else if (m === 1) this.appCursor = on; else if (m === 7) this.wrap = on; else if (m === 2004) this.bracketed = on;
           else if (m === 1049 || m === 1047 || m === 47) this.altScreen(on);
+          else if (m === 1000 || m === 1002 || m === 1003) this.mouse = on ? m : 0; // report: clicks / +drag / +all motion
+          else if (m === 1006) this.mouseSgr = on; else if (m === 1007) this.altScroll = on;
         } return; }
       default: return;
     }
@@ -212,4 +221,21 @@ export function encodeKey(ev, vt = {}) {
     return alt ? '\x1b' + k : k;
   }
   return '';
+}
+
+// Mouse -> bytes (xterm SGR 1006 when the app asked for it, else the legacy X10 form). `ev`: {type:'down'|'up'|'move'|'wheel',
+// button:0|1|2, dy, x, y (0-based cells), shift, alt, ctrl}. Returns '' when the app did not ask for this kind of event.
+export function encodeMouse(ev, vt) {
+  if (!vt.mouse) return '';
+  if (ev.type === 'move' && vt.mouse < 1002) return '';
+  let b;
+  if (ev.type === 'wheel') b = (ev.dy < 0 ? 64 : 65);
+  else if (ev.type === 'up') b = vt.mouseSgr ? ev.button : 3;
+  else b = ev.button + (ev.type === 'move' ? 32 : 0);
+  if (ev.type === 'move' && !ev.buttons && vt.mouse < 1003) return '';
+  b += (ev.shift ? 4 : 0) + (ev.alt ? 8 : 0) + (ev.ctrl ? 16 : 0);
+  const x = Math.max(0, ev.x) + 1, y = Math.max(0, ev.y) + 1;
+  if (vt.mouseSgr) return `\x1b[<${b};${x};${y}${ev.type === 'up' ? 'm' : 'M'}`;
+  if (x > 222 || y > 222) return '';
+  return '\x1b[M' + String.fromCharCode(32 + b, 32 + x, 32 + y);
 }

@@ -54,5 +54,5 @@ export function drawTerm(c, measure, T, r, term, { captured = false } = {}) {
     if (str.trim()) c.text(u.x, u.y + 1, str, TM_FONT, fg, { f: 'mono', w: u.fl & 1 ? 700 : 400, term: true });
     if (u.fl & 8 && str.trim()) c.fill(u.x, u.y + TM_LH - 2, str.length * cw, 1, fg);
   }
-  return { cols, rows };
+  return { cols, rows, x: r.x, y: r.y, cw, lh: TM_LH };
 }

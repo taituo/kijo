@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { VT, FL, encodeKey } from '../src/vt.mjs';
+import { VT, FL, encodeKey, encodeMouse } from '../src/vt.mjs';
 
 const mk = (c = 20, r = 5, o = {}) => new VT({ cols: c, rows: r, ...o });
 let t = mk(); t.write('hello\r\nworld');
@@ -42,4 +42,29 @@ t.resize(40, 10); assert.ok(t.g.length === 10 && t.g.every(r => r.length === 40)
 // keys
 assert.equal(encodeKey({ key: 'c', ctrlKey: true }), '\x03'); assert.equal(encodeKey({ key: 'Enter' }), '\r'); assert.equal(encodeKey({ key: 'a' }), 'a'); assert.equal(encodeKey({ key: 'Backspace' }), '\x7f');
 assert.equal(encodeKey({ key: 'ArrowLeft', ctrlKey: true }), '\x1b[1;5D'); assert.equal(encodeKey({ key: 'x', altKey: true }), '\x1bx'); assert.equal(encodeKey({ key: 'Shift' }), '');
-console.log('PASS — vt: cursor, wrap, scrollback, SGR (16/256/truecolor), edit ops, alt screen, DSR replies, OSC title + 7501 status, hostile input, keys');
+// mouse reporting: off by default, modes 1000/1002/1003, SGR (1006) and legacy encodings, wheel, modifiers
+{
+  const m = new VT({ cols: 80, rows: 24 });
+  assert.equal(encodeMouse({ type: 'down', button: 0, x: 4, y: 2 }, m), '', 'nothing is reported until the app asks');
+  m.write('\x1b[?1000h\x1b[?1006h'); assert.equal(m.mouse, 1000); assert.equal(m.mouseSgr, true);
+  assert.equal(encodeMouse({ type: 'down', button: 0, x: 4, y: 2 }, m), '\x1b[<0;5;3M'); assert.equal(encodeMouse({ type: 'up', button: 0, x: 4, y: 2 }, m), '\x1b[<0;5;3m');
+  assert.equal(encodeMouse({ type: 'down', button: 2, x: 0, y: 0, ctrl: true }, m), '\x1b[<18;1;1M', 'right button + ctrl');
+  assert.equal(encodeMouse({ type: 'wheel', dy: -1, x: 1, y: 1 }, m), '\x1b[<64;2;2M'); assert.equal(encodeMouse({ type: 'wheel', dy: 1, x: 1, y: 1 }, m), '\x1b[<65;2;2M');
+  assert.equal(encodeMouse({ type: 'move', buttons: 1, x: 1, y: 1 }, m), '', '1000 does not report drags');
+  m.write('\x1b[?1002h'); assert.equal(encodeMouse({ type: 'move', button: 0, buttons: 1, x: 9, y: 3 }, m), '\x1b[<32;10;4M', 'drag in 1002');
+  assert.equal(encodeMouse({ type: 'move', button: 0, buttons: 0, x: 9, y: 3 }, m), '', '1002 ignores plain motion');
+  m.write('\x1b[?1003h'); assert.equal(encodeMouse({ type: 'move', button: 3, buttons: 0, x: 9, y: 3 }, m), '\x1b[<35;10;4M', 'any-motion in 1003');
+  m.write('\x1b[?1006l'); assert.equal(encodeMouse({ type: 'down', button: 0, x: 4, y: 2 }, m), '\x1b[M' + String.fromCharCode(32, 37, 35), 'legacy X10 form');
+  assert.equal(encodeMouse({ type: 'down', button: 0, x: 300, y: 2 }, m), '', 'legacy form cannot address columns past 222');
+  m.write('\x1b[?1000l\x1b[?1002l\x1b[?1003l'); assert.equal(m.mouse, 0);
+}
+
+// shrinking keeps content near the top of a fresh terminal in place; the cursor line stays visible
+{
+  const r = new VT({ cols: 80, rows: 24 }); r.write('prompt$ echo hi\r\nhi\r\nprompt$ ');
+  r.resize(72, 14); assert.equal(r.text().split('\n')[0], 'prompt$ echo hi', 'rows below the cursor leave first'); assert.equal(r.back.length, 0); assert.equal(r.y, 2);
+  const f = new VT({ cols: 20, rows: 6 }); for (let i = 0; i < 6; i++) f.write('line' + i + (i < 5 ? '\r\n' : ''));
+  f.resize(20, 3); assert.equal(f.text(), 'line3\nline4\nline5', 'a full screen keeps the cursor line and scrolls the top into history'); assert.equal(f.back.length, 3); assert.equal(f.y, 2);
+}
+
+console.log('PASS — vt: cursor, wrap, scrollback, SGR (16/256/truecolor), edit ops, alt screen, DSR replies, OSC title + 7501 status, hostile input, keys, mouse reporting');

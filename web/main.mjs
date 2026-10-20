@@ -5,7 +5,7 @@ import { instantiateCore, getTiles, serializeState, applyState, selectedTile, di
 import { Store, baseName } from '../src/telemetry.mjs';
 import { startBrowserInjector, installInjectors, Sources, injectInto } from './injectors.mjs';
 import { connectDaemon } from './daemon.mjs';
-import { VT, encodeKey } from '../src/vt.mjs';
+import { VT, encodeKey, encodeMouse } from '../src/vt.mjs';
 import { WINDOWS, windowLabel } from './telemetry-draw.mjs';
 import { buildDisplayList, THEMES, Anim, WALLPAPERS } from './displaylist.mjs';
 import { createGpuRenderer } from './gpu.mjs';
@@ -116,6 +116,7 @@ async function boot() {
     for (let w = 0; w < 9; w++) items.push({ title: `Move selected tile to workspace ${w + 1}`, hint: 'alt+shift+' + (w + 1), run: () => { if (dispatch(api, 'MOVETOWORKSPACE', w)) log(`Moved tile to workspace ${w + 1}`); else say('Nothing to move, or the workspace is full'); } });
     for (const n of ['glass', 'dark', 'light']) items.push({ title: `Theme: ${n}`, hint: n === 'glass' ? 'W wallpaper' : '', run: () => { themeName = n; setPref('kijo.theme', n); } });
     WALLPAPERS.forEach((w, i) => items.push({ title: `Wallpaper: ${w.name}`, hint: 'glass', run: () => { themeName = 'glass'; setPref('kijo.theme', 'glass'); wallIx = i; applyWall(); } }));
+    if (dstate.shell) items.push({ title: 'Terminal: new shell tile here', hint: 'kijod', run: () => { if (st.terms.size >= 4) return say('kijod allows 4 shells at a time'); const id = placeTile(api, APP.SHELL); if (!id) return say('No free slot in this workspace'); st.view = 'focus'; log(`Pinned shell as #${id}`); const t = getTiles(api).find(x => x.id === id); if (t) enterTerm(t); } });
     if (dstate.shell) items.push({ title: 'Terminal: open shell', hint: 'kijod', run: () => { const e = shellTiles().find(x => !st.terms.has(x.t.id) || st.terms.get(x.t.id).exited !== null) || shellTiles()[0]; if (!e) return say('no shell tile (Reset demo workspace restores one)'); goTo(e.w, e.i % SIDE, Math.floor(e.i / SIDE)); enterTerm(e.t); } });
     items.push({ title: 'New note here', hint: 'N', run: () => handleKeyName(api, st, 'n') });
     items.push({ title: 'Reserve a 2x2 footprint here', hint: 'F', run: () => handleKeyName(api, st, 'f') });
@@ -297,16 +298,29 @@ async function boot() {
   // 3D surface tiles: drag to orbit (yaw/pitch live in st.cam, the display list just reads them).
   let drag = null, selDrag = null, lastText = '';
   const selKey = () => st.view + ':' + (api.kijo_special_open() ? 's' : api.kijo_ws());
+  // Mouse reporting: when the app in a captured terminal asked for the mouse (vim, tmux, htop...), pointer events go to it as
+  // xterm sequences. Shift bypasses (select text instead), exactly as in xterm.
+  let termGeo = {}, tmDrag = null, tmCell = '';
+  const termMouse = ev => {
+    if (!st.capture || ev.shiftKey) return null; const tm = st.terms.get(st.capture), g = termGeo[st.capture]; if (!tm || !g || !tm.vt.mouse || tm.exited !== null) return null;
+    const cx = Math.floor((ev.clientX - g.x) / g.cw), cy = Math.floor((ev.clientY - g.y) / g.lh);
+    if (cx < 0 || cy < 0 || cx >= Math.min(g.cols, tm.vt.cols) || cy >= Math.min(g.rows, tm.vt.rows)) return null;
+    return { tm, x: cx, y: cy, mods: { shift: ev.shiftKey, alt: ev.altKey, ctrl: ev.ctrlKey } };
+  };
+  const sendMouse = (m, e) => { const b = encodeMouse({ ...e, x: m.x, y: m.y, ...m.mods }, m.tm.vt); if (b) sendTerm(m.tm, b); };
   canvas.addEventListener('pointerdown', ev => {
+    const tmo = termMouse(ev); if (tmo) { tmDrag = { button: Math.min(2, ev.button) }; tmCell = tmo.x + ',' + tmo.y; sendMouse(tmo, { type: 'down', button: tmDrag.button }); canvas.setPointerCapture?.(ev.pointerId); ev.preventDefault(); return; }
     const h = hitAt(ev); activate(h, false); st.sel = null;
     const tt = h?.kind === 'tile' && st.view === 'focus' && !st.palette && !st.editing ? getTiles(api)[h.meta] : null;
     if (tt && tt.app !== APP.SCENE3D) selDrag = { surf: tt.id, ax: ev.clientX, ay: ev.clientY, key: selKey() };
     if (h?.kind === 'tile' && getTiles(api)[h.meta]?.app === APP.SCENE3D) { drag = { x: ev.clientX, y: ev.clientY, yaw: st.cam.manual ? st.cam.yaw : st.cam.yaw + (performance.now() - t0) / 1000 * 0.15, pitch: st.cam.pitch }; canvas.setPointerCapture?.(ev.pointerId); }
   });
   canvas.addEventListener('pointermove', ev => {
+    if (tmDrag || (st.capture && st.terms.get(st.capture)?.vt.mouse === 1003)) { const tmo = termMouse(ev); if (tmo && tmo.x + ',' + tmo.y !== tmCell) { tmCell = tmo.x + ',' + tmo.y; sendMouse(tmo, { type: 'move', button: tmDrag ? tmDrag.button : 3, buttons: tmDrag ? 1 : 0 }); } if (tmDrag) return; }
     if (selDrag && (Math.hypot(ev.clientX - selDrag.ax, ev.clientY - selDrag.ay) > 4 || st.sel)) st.sel = { surf: selDrag.surf, ax: selDrag.ax, ay: selDrag.ay, bx: ev.clientX, by: ev.clientY, key: selDrag.key };
     if (!drag) return; st.cam.manual = true; st.cam.yaw = drag.yaw - (ev.clientX - drag.x) * 0.008; st.cam.pitch = Math.max(0.08, Math.min(1.45, drag.pitch + (ev.clientY - drag.y) * 0.006)); });
-  const endDrag = () => {
+  const endDrag = ev => {
+    if (tmDrag) { const tmo = termMouse(ev || {}) || (() => { const tm = st.terms.get(st.capture), g = termGeo[st.capture]; return tm && g ? { tm, x: 0, y: 0, mods: {} } : null; })(); if (tmo) sendMouse(tmo, { type: 'up', button: tmDrag.button }); tmDrag = null; return; }
     const sd = selDrag; drag = null; selDrag = null; if (st.sel && !lastText) st.sel = null;
     if (sd && !st.sel && st.view === 'focus' && st.terms.has(sd.surf) && getTiles(api).some(t => t.id === sd.surf && t.app === APP.SHELL)) { const tm = st.terms.get(sd.surf); if (tm.exited === null) st.capture = sd.surf; } // a click (not a drag) on a live terminal captures keys
   };
@@ -316,6 +330,7 @@ async function boot() {
   canvas.addEventListener('wheel', ev => {
     ev.preventDefault(); if (st.palette) return;
     { const h = hitAt(ev), ht = h?.kind === 'tile' && st.view === 'focus' ? getTiles(api)[h.meta] : null, tm = ht && st.terms.get(ht.id); // wheel over a terminal scrolls its history
+      if (tm && st.capture === ht.id && tm.vt.mouse && !ev.shiftKey) { const tmo = termMouse(ev); if (tmo) sendMouse(tmo, { type: 'wheel', dy: ev.deltaY }); wheel = 0; return; } // the app owns the wheel
       if (tm) { tm.view = clampI(tm.view + (ev.deltaY < 0 ? 3 : -3), 0, tm.vt.g === tm.vt.main ? tm.vt.back.length : 0); wheel = 0; return; } }
     wheel += ev.deltaY;
     if (wheel > 120) { st.view = st.view === 'focus' ? 'overview' : st.view === 'overview' ? 'workspaces' : st.view; wheel = 0; }
@@ -348,12 +363,16 @@ async function boot() {
     const p0 = performance.now();
     const list = buildDisplayList(api, st, env);
     hits = list.hits; lastText = list.selectionText || '';
-    syncTerms(list.termSizes || {}, now);
+    termGeo = list.termSizes || {}; syncTerms(termGeo, now);
+    if (st.terms.size && frames % 30 === 0) { // a closed tile takes its shell with it
+      const live = new Set(); for (let w = 0; w < 10; w++) for (const t of getTiles(api, w)) if (t.kind === 1 && t.app === APP.SHELL) live.add(t.id);
+      for (const [tid, tm] of [...st.terms]) if (!live.has(tid)) { daemon?.ptyClose(tm.id); termById.delete(tm.id); st.terms.delete(tid); if (st.capture === tid) st.capture = null; }
+    }
     if (st.capture && (st.view !== 'focus' || selectedTile(api).id !== st.capture)) st.capture = null; // leaving the tile releases the keys
     if (st.sel && st.sel.key !== selKey()) { st.sel = null; lastText = ''; }
     renderer.draw(list, env);
     drawAcc += performance.now() - p0; drawN++; lastCmds = list.cmds.length;
-    globalThis.__kijo = { api, st, store, anim, act, sources, connect, tiles: w => getTiles(api, w), selectedText: () => lastText, renderer: renderer.name, rendererObj: renderer, term: () => [...st.terms.values()].map(t => ({ tile: t.tile, id: t.id, text: t.vt.text(), cols: t.vt.cols, rows: t.vt.rows, exited: t.exited, title: t.title })), frames: (globalThis.__kijo?.frames || 0) + 1 };
+    globalThis.__kijo = { api, st, store, anim, act, sources, connect, tiles: w => getTiles(api, w), selectedText: () => lastText, renderer: renderer.name, rendererObj: renderer, termGeo: () => termGeo, term: () => [...st.terms.values()].map(t => ({ tile: t.tile, id: t.id, text: t.vt.text(), cols: t.vt.cols, rows: t.vt.rows, exited: t.exited, title: t.title })), frames: (globalThis.__kijo?.frames || 0) + 1 };
     requestAnimationFrame(frame);
   }
   log(`Kijo started / ${renderer.name}${renderer.gpu !== 'none' ? ' / ' + renderer.gpu : ''}`);
