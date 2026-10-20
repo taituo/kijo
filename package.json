@@ -1,0 +1,13 @@
+{
+  "name": "kijo-wasm-spatial-core",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "engines": {"node": ">=22"},
+  "scripts": {
+    "build": "sh build.sh",
+    "start": "node src/host.mjs",
+    "overview": "node src/host.mjs --view overview --once",
+    "test": "node --test test/test.mjs"
+  }
+}
