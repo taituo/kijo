@@ -106,8 +106,9 @@ export async function startDaemon({ port = 7501, host = '127.0.0.1', token = pro
   function ptyOpen(cols, rows) {
     const id = ++ptySeq, p = spawn('python3', ['-I', '-c', PTY_HELPER, String(cols), String(rows)], { stdio: ['pipe', 'pipe', 'ignore', 'pipe'] });
     const s = { id, p, cols, rows, replay: Buffer.alloc(0), pending: [], timer: null, dead: false };
-    const flushOut = () => { s.timer = null; const d = Buffer.concat(s.pending); s.pending = []; if (d.length) sse('pty', { id, d: d.toString('base64') }); };
-    p.stdout.on('data', d => { s.replay = Buffer.concat([s.replay, d]).subarray(-PTY_REPLAY); s.pending.push(d); s.timer ??= setTimeout(flushOut, 16); });
+    const flushOut = () => { s.timer = null; s.lastFlush = Date.now(); const d = Buffer.concat(s.pending); s.pending = []; if (d.length) sse('pty', { id, d: d.toString('base64') }); };
+    s.lastFlush = 0; // leading edge: output after a quiet moment goes out at once (keystroke echo), a burst is coalesced into ~16 ms frames
+    p.stdout.on('data', d => { s.replay = Buffer.concat([s.replay, d]).subarray(-PTY_REPLAY); s.pending.push(d); if (s.timer) return; const wait = 16 - (Date.now() - s.lastFlush); if (wait <= 0) flushOut(); else s.timer = setTimeout(flushOut, wait); });
     p.on('error', e => { log('warn', `pty ${id} failed: ${e.message}`); });
     p.on('close', code => { s.dead = true; clearTimeout(s.timer); flushOut(); ptys.delete(id); sse('pty', { id, exit: code ?? -1 }); log('info', `pty ${id} exited (${code})`); });
     p.stdin.on('error', () => {}); p.stdio[3].on('error', () => {});

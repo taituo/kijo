@@ -27,12 +27,23 @@ export class VT {
     this.cols = cols; this.rows = rows; fix(this.main); if (this.altGrid) fix(this.altGrid);
     this.y = Math.min(this.y, rows - 1); this.x = Math.min(this.x, cols - 1); this.top = 0; this.bot = rows - 1; this.pend = false; this.version++;
   }
-  pushBack(r) { this.back.push(r); if (this.back.length > this.maxBack) this.back.shift(); }
+  pushBack(r) { this.back.push(r); if (this.back.length > this.maxBack) this.evicted = this.back.shift(); } // the evicted row is recycled by scrollUp
 
   // Feed output. Accepts a string or bytes (decoded as streaming UTF-8 is the caller's job for strings).
   write(data) {
     const s = typeof data === 'string' ? data : this.dec.decode(data, { stream: true });
-    for (const ch of s) this.feed(ch);
+    const n = s.length;
+    for (let i = 0; i < n; i++) {
+      const c = s.charCodeAt(i);
+      if (c >= 0x20 && c < 0x7f && this.state === 'g') { // hot path: printable ASCII in the ground state (most of all output)
+        if (this.pend && this.wrap) { this.x = 0; this.lf(); }
+        this.pend = false;
+        const cell = this.g[this.y][this.x]; cell.ch = s[i]; cell.fg = this.fg; cell.bg = this.bg; cell.fl = this.fl;
+        if (this.x < this.cols - 1) this.x++; else this.pend = true;
+        continue;
+      }
+      if (c >= 0xd800 && c < 0xdc00 && i + 1 < n) { this.feed(s[i] + s[i + 1]); i++; } else this.feed(s[i]); // surrogate pairs stay whole
+    }
     this.version++;
   }
 
@@ -76,7 +87,11 @@ export class VT {
     this.pend = false;
   }
   scrollUp(n) {
-    for (let i = 0; i < n; i++) { const r = this.g.splice(this.top, 1)[0]; if (this.g === this.main && this.top === 0) this.pushBack(r); this.g.splice(this.bot, 0, this.row()); }
+    for (let i = 0; i < n; i++) {
+      const r = this.g.splice(this.top, 1)[0]; let fresh = null;
+      if (this.g === this.main && this.top === 0) { this.pushBack(r); if (this.back.length >= this.maxBack && this.evicted?.length === this.cols) { fresh = this.evicted; this.evicted = null; for (const c of fresh) { c.ch = ' '; c.fg = -1; c.bg = this.bg; c.fl = 0; } } }
+      this.g.splice(this.bot, 0, fresh || this.row());
+    }
   }
   scrollDown(n) { for (let i = 0; i < n; i++) { this.g.splice(this.bot, 1); this.g.splice(this.top, 0, this.row()); } }
 
