@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const read = p => readFileSync(resolve(root, p), 'utf8');
-const WEB = ['web/fonts.mjs', 'src/core.mjs', 'src/telemetry.mjs', 'web/injectors.mjs', 'web/daemon.mjs', 'web/telemetry-draw.mjs', 'web/displaylist.mjs', 'web/gpu.mjs', 'web/canvas2d.mjs', 'web/main.mjs'];
+const WEB = ['web/fonts.mjs', 'src/core.mjs', 'src/telemetry.mjs', 'web/injectors.mjs', 'web/daemon.mjs', 'web/telemetry-draw.mjs', 'web/displaylist.mjs', 'web/surface3d.mjs', 'web/gpu.mjs', 'web/canvas2d.mjs', 'web/main.mjs'];
 const strip = src => src
   .replace(/^import\s[^;]+;\s*$/gm, '')
   .replace(/^export\s*\{[^}]*\};?\s*$/gm, '')
@@ -20,7 +20,7 @@ export function bundle() {
   const code = WEB.map(p => `// ---- ${p}\n` + strip(read(p))).join('\n');
   if (/^\s*(import|export)\s/m.test(code)) throw new Error('bundle: unhandled import/export form');
   const embed = {};
-  for (const p of ['core/scene.wasm.b64', 'shaders/scene.wgsl', 'shaders/heatmap.wgsl']) embed[p] = read(p);
+  for (const p of ['core/scene.wasm.b64', 'shaders/scene.wgsl', 'shaders/heatmap.wgsl', 'shaders/surface.wgsl']) embed[p] = read(p);
   const json = JSON.stringify(embed).replace(/</g, '\\u003c');
   return read('web/index.html').replace('<script type="module" src="./main.mjs"></script>',
     `<script>globalThis.KIJO_EMBED=${json};</script>\n<script type="module">\n${code.replace(/<\/script/gi, '<\\/script')}\n</script>`);

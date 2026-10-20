@@ -22,13 +22,13 @@ async function boot() {
 
   let renderer = null;
   if (params.get('renderer') !== '2d') {
-    try { renderer = await createGpuRenderer(canvas, { sceneWGSL: await source('shaders/scene.wgsl'), heatWGSL: await source('shaders/heatmap.wgsl') }); }
+    try { renderer = await createGpuRenderer(canvas, { sceneWGSL: await source('shaders/scene.wgsl'), heatWGSL: await source('shaders/heatmap.wgsl'), surfaceWGSL: await source('shaders/surface.wgsl') }); }
     catch (err) { console.warn('WebGPU unavailable, falling back to Canvas2D:', err); }
   }
   if (!renderer) renderer = createCanvasRenderer(canvas);
 
   let restored = false;
-  const st = { view: 'focus', ghosts: false, notes: { ...DEFAULT_NOTES }, bindings: { ...DEFAULT_BINDINGS }, window: 300000, events: [], editing: null, palette: null, message: '' };
+  const st = { view: 'focus', ghosts: false, notes: { ...DEFAULT_NOTES }, bindings: { ...DEFAULT_BINDINGS }, window: 300000, cam: { manual: false, yaw: 0.6, pitch: 0.5, dist: 2.7 }, events: [], editing: null, palette: null, message: '' };
   // Everything shown by telemetry tiles comes from this store; injectors are the only writers.
   const store = new Store();
   store.onStatus = m => m.id > 0 && api.kijo_report(m.id, m.state, m.kind, m.progress) === 1;
@@ -100,7 +100,7 @@ async function boot() {
     const pin = (app, name) => { const id = placeTile(api, app); if (!id) return say('No free slot in this workspace'); if (name) st.bindings[id] = name; st.view = 'focus'; log(`Pinned ${name || tag({ app })} as #${id}`); };
     const groups = [...new Set([...store.series.keys()].map(baseName))].sort();
     for (const g of groups) items.push({ title: `Pin chart: ${g}`, hint: 'chart', run: () => pin(APP.SERIES, g) });
-    items.push({ title: 'Pin logs', hint: 'tile', run: () => pin(APP.LOGS) }, { title: 'Pin traces', hint: 'tile', run: () => pin(APP.TRACES) }, { title: 'Pin system', hint: 'tile', run: () => pin(APP.SYS) });
+    items.push({ title: 'Pin logs', hint: 'tile', run: () => pin(APP.LOGS) }, { title: 'Pin traces', hint: 'tile', run: () => pin(APP.TRACES) }, { title: 'Pin system', hint: 'tile', run: () => pin(APP.SYS) }, { title: 'Pin 3D surface', hint: 'tile', run: () => pin(APP.SCENE3D) });
     for (const ms of WINDOWS) items.push({ title: `Time window: ${windowLabel(ms)}`, hint: '[ ]', run: () => (st.window = ms) });
     const q0 = q.trim(), mm = q0.match(/^(pull|ws|kijod)\s+(\S+)(?:\s+(\S+))?/i);
     if (mm) {
@@ -209,8 +209,16 @@ async function boot() {
       save();
     }
   }
-  canvas.addEventListener('pointerdown', ev => activate(hitAt(ev), false));
-  canvas.addEventListener('dblclick', ev => activate(hitAt(ev), true));
+  // 3D surface tiles: drag to orbit (yaw/pitch live in st.cam, the display list just reads them).
+  let drag = null;
+  canvas.addEventListener('pointerdown', ev => {
+    const h = hitAt(ev); activate(h, false);
+    if (h?.kind === 'tile' && getTiles(api)[h.meta]?.app === APP.SCENE3D) { drag = { x: ev.clientX, y: ev.clientY, yaw: st.cam.manual ? st.cam.yaw : st.cam.yaw + (performance.now() - t0) / 1000 * 0.15, pitch: st.cam.pitch }; canvas.setPointerCapture?.(ev.pointerId); }
+  });
+  canvas.addEventListener('pointermove', ev => { if (!drag) return; st.cam.manual = true; st.cam.yaw = drag.yaw - (ev.clientX - drag.x) * 0.008; st.cam.pitch = Math.max(0.08, Math.min(1.45, drag.pitch + (ev.clientY - drag.y) * 0.006)); });
+  const endDrag = () => { drag = null; };
+  canvas.addEventListener('pointerup', endDrag); canvas.addEventListener('pointercancel', endDrag);
+  canvas.addEventListener('dblclick', ev => { const h = hitAt(ev); if (h?.kind === 'tile' && getTiles(api)[h.meta]?.app === APP.SCENE3D) { st.cam.manual = false; return; } activate(h, true); });
   let wheel = 0;
   canvas.addEventListener('wheel', ev => {
     ev.preventDefault(); if (st.palette) return;

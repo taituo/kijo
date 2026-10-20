@@ -59,6 +59,16 @@ await page.keyboard.press('Escape'); assert.equal((await sel())[3], 'focus');
 await page.goto(BUNDLE + '?renderer=2d'); await page.waitForFunction(() => globalThis.__kijo?.frames > 5);
 assert.equal(await q(() => Object.values(__kijo.st.bindings).includes('queue.depth')), true, 'bindings survive reload');
 
+// ---- 3D surface tile: renders (2D fallback path here), orbits on drag, no errors
+await page.goto(BUNDLE + '?renderer=2d&fresh'); await page.waitForFunction(() => globalThis.__kijo?.frames > 5);
+await q(() => { const now = Date.now(); for (let i = 60; i >= 0; i--) for (let k = 0; k < 4; k++) kijo.inject(JSON.stringify({ t: 'metric', name: 'cpu.core_pct', value: (i * 7 + k * 25) % 100, unit: '%', labels: { core: String(k) }, ts: now - i * 1000 }), 'e2e-3d'); });
+await page.keyboard.press('Alt+Digit5'); await page.waitForTimeout(900);
+assert.equal(await q(() => __kijo.tiles(4).some(t => t.kind === 1 && t.app === 11)), true, 'workspace 5 holds a 3D tile');
+await page.mouse.move(300, 250); await page.mouse.down(); await page.mouse.move(380, 280, { steps: 4 }); await page.mouse.up();
+assert.equal(await q(() => __kijo.st.cam.manual === true && Math.abs(__kijo.st.cam.yaw - 0.6) > 0.05), true, 'dragging the tile orbits the camera');
+await page.keyboard.press('/'); await page.keyboard.type('pin 3d'); await page.keyboard.press('Enter');
+assert.equal(await q(() => __kijo.tiles(4).filter(t => t.kind === 1 && t.app === 11).length), 2, 'palette pins another 3D surface');
+
 // ---- optional relay: same page, remote injector, token only in the fragment
 const { startDaemon } = await import('../src/kijod.mjs');
 const d = await startDaemon({ port: 0, token: 'e2e-token', collect: true, ui: bundle(), quiet: true });

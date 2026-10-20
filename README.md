@@ -75,6 +75,18 @@ node src/kijod.mjs                 # the relay from a checkout (KIJOD_PORT, KIJO
 On a VPS keep the loopback bind and tunnel it: `ssh -L 7501:127.0.0.1:7501 host`.
 Node 22+. Chrome with WebGPU is best; `?renderer=2d` forces the Canvas2D fallback.
 
+## 3D tile
+
+Workspace 5 puts a **3D surface** tile (rows = series, columns = time, height = value) next to a text
+log and two charts: a GPU surface coexisting with text surfaces. It is a small in-house pass inside the
+same WebGPU frame (`shaders/surface.wgsl`, geometry in `web/surface3d.mjs`): own render pass, depth
+buffer, scissored to the tile, flat-shaded from derivatives. Percent series keep their 0-100 scale,
+others are min-max normalised per series and the tile says so. The camera auto-orbits; drag to orbit,
+double-click to spin again. Canvas2D draws the same geometry with a painter's algorithm. `Pin 3D
+surface` in the palette adds more. A full engine (three.js, Babylon, a native Bevy/wgpu host) can later
+plug in as another surface type behind the same display-list op; none is needed for height fields and
+a dependency would own the device and the pass structure.
+
 ## Glass theme and wallpaper
 
 `?theme=glass` or palette `Theme: glass`: translucent panels over a procedural wallpaper, drawn by two

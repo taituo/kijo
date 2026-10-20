@@ -7,7 +7,7 @@ export const NODE = { SLOT: 1, TILE: 2, GHOST: 3, LINK: 4, EVENT: 5, WORKSPACE: 
 // Same vocabulary as OSC 7501 (done = COMPLETE).
 export const STATUS = ['idle', 'working', 'blocked', 'error', 'done'];
 export const BLOCKED_KIND = ['', 'permission', 'question', 'auth'];
-export const APP = { NONE: 0, SHELL: 1, AGENT: 2, METRICS: 3, REMOTE: 4, NOTE: 5, HERDR: 6, SYS: 7, SERIES: 8, LOGS: 9, TRACES: 10 };
+export const APP = { NONE: 0, SHELL: 1, AGENT: 2, METRICS: 3, REMOTE: 4, NOTE: 5, HERDR: 6, SYS: 7, SERIES: 8, LOGS: 9, TRACES: 10, SCENE3D: 11 };
 export const VIEWS = ['focus', 'overview', 'back', 'timeline', 'workspaces'];
 export const FLAG = { SELECTED: 1, IN_VIEWPORT: 2, ACTIVE_WS: 4 };
 export const OP = { MOVEFOCUS: 1, WORKSPACE: 2, MOVETOWORKSPACE: 3, KILLACTIVE: 4, TOGGLESPECIAL: 5, SWAP: 6, JUMPFOCUS: 7, CYCLEWORKSPACE: 8 };
@@ -90,7 +90,7 @@ export function applyState(api, state) {
 // Which series a chart tile shows (string or up to 3 names). Tiles without an entry are unbound.
 export const DEFAULT_BINDINGS = {
   8: 'browser.fps', 9: 'browser.draw_ms', 10: 'browser.loop_lag_ms', 11: 'browser.cmds',
-  13: 'cpu.util_pct', 14: 'mem.used_pct', 15: ['net.rx_kbps', 'net.tx_kbps'],
+  13: 'cpu.util_pct', 14: 'mem.used_pct', 15: ['net.rx_kbps', 'net.tx_kbps'], 20: 'cpu.util_pct', 21: ['browser.draw_ms', 'browser.loop_lag_ms'],
 };
 // Put a new tile on the empty slot nearest the selection (same workspace) and select it.
 export function placeTile(api, app) {
@@ -114,9 +114,10 @@ export function label(t, notes = {}, bindings = {}) {
   if (t.app === APP.SERIES) { const b = bindings[t.id]; return b ? [].concat(b)[0].replace(/\{.*$/, '') : 'CHART / unbound'; }
   if (t.app === APP.LOGS) return 'LOGS';
   if (t.app === APP.TRACES) return 'TRACES';
+  if (t.app === APP.SCENE3D) return '3D SURFACE';
   return String(notes[t.id] ?? `NOTE ${t.id}`).slice(0, 40);
 }
-export const tag = t => ['', 'SHELL', 'AGENT', 'HOST', 'SSH', 'NOTE', 'HERDR', 'SYS', 'CHART', 'LOGS', 'TRACE'][t.app] || '';
+export const tag = t => ['', 'SHELL', 'AGENT', 'HOST', 'SSH', 'NOTE', 'HERDR', 'SYS', 'CHART', 'LOGS', 'TRACE', '3D'][t.app] || '';
 
 // ---------------------------------------------------------------------------
 // Host-independent key handling. Every host maps its raw input to these names:

@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs';
 import { instantiateCore, dispatch, handleKeyName, DEFAULT_BINDINGS, DEFAULT_NOTES, APP, getTiles } from '../src/core.mjs';
 import { Store } from '../src/telemetry.mjs';
 import { drawChart, drawLogs, drawTraces, drawSys, drawFlow, flowModel, fmtVal } from '../web/telemetry-draw.mjs';
+import { buildSurface, s3Project } from '../web/surface3d.mjs';
+import { surfaceModel } from '../web/telemetry-draw.mjs';
 import { buildDisplayList, THEMES, Anim } from '../web/displaylist.mjs';
 
 const measure = (s, z) => String(s).length * z * 0.6;
@@ -71,6 +73,18 @@ for (const view of ['focus', 'overview', 'flow', 'workspaces']) {
   for (const k of gl.cmds.filter(k => k.op === 'glass')) assert.ok([k.x, k.y, k.w, k.h, k.r, k.k, k.m].every(Number.isFinite) && k.w > 0 && k.h > 0);
   assert.ok(!buildDisplayList(api, st, env).cmds.some(k => k.op === 'glass' || k.op === 'wall'), 'dark theme emits neither');
 }
+// 3D surface tile: data-only op, honest model, geometry inside the view frustum
+st.view = 'focus'; if (api.kijo_special_open()) dispatch(api, 'TOGGLESPECIAL'); dispatch(api, 'WORKSPACE', 4);
+const cores = new Store(); for (let i = 0; i < 120; i++) for (let k = 0; k < 6; k++) cores.push('cpu.core_pct', (i * 3 + k * 20) % 100, NOW - (120 - i) * 1000, { labels: { core: String(k) } });
+const l3 = buildDisplayList(api, st, { ...env, store: cores, anim: (() => { const a = new Anim(); return a; })() });
+const op3 = l3.cmds.find(k => k.op === 'scene3d'); assert.ok(op3, 'workspace 5 emits a scene3d op'); assert.equal(op3.rows, 6); assert.equal(op3.vals.length, 6 * op3.cols);
+assert.ok(op3.vals.every(v => v >= 0 && v <= 1), 'height values are normalised');
+const sm = surfaceModel(cores, [], 300000, NOW); assert.equal(sm.norm, 'percent 0-100'); assert.equal(sm.rows, 6);
+const odd = new Store(); for (let i = 0; i < 50; i++) odd.push('queue.depth', i * 10, NOW - (50 - i) * 1000); const so = surfaceModel(odd, [], 300000, NOW); assert.equal(so.norm, 'per-series min-max'); assert.equal(so.rows, 1);
+assert.equal(surfaceModel(new Store(), [], 300000, NOW).rows, 0, 'no data -> no rows, no fake surface');
+const geo = buildSurface({ ...op3, aspect: 1.6 }); assert.ok(geo.triCount === 5 * 47 * 6 && geo.lineCount > 100);
+let inside = 0; for (let i = 0; i < geo.triCount; i++) { const p = s3Project(geo.mvp, geo.tri[i * 7], geo.tri[i * 7 + 1], geo.tri[i * 7 + 2]); if (p && Math.abs(p[0]) <= 1.2 && Math.abs(p[1]) <= 1.2) inside++; }
+assert.ok(inside / geo.triCount > 0.95, 'the surface is framed by the default camera');
 // key '6' selects flow and the terminal host can opt out of it
 const ui = { view: 'focus', notes: {}, events: [], bindings: {} }; handleKeyName(api, ui, '6'); assert.equal(ui.view, 'flow');
 const tui = { view: 'focus', flow: false, notes: {}, events: [], bindings: {} }; handleKeyName(api, tui, '6'); assert.equal(tui.view, 'focus');

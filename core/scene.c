@@ -19,7 +19,7 @@ enum { EMPTY = 0, REAL = 1, GHOST = 2 };
 enum { IDLE = 0, WORKING = 1, BLOCKED = 2, ERROR = 3, COMPLETE = 4 };
 enum { BK_NONE = 0, BK_PERMISSION = 1, BK_QUESTION = 2, BK_AUTH = 3 };
 enum { APP_NONE = 0, APP_SHELL = 1, APP_AGENT = 2, APP_METRICS = 3, APP_REMOTE = 4, APP_NOTE = 5, APP_HERDR = 6,
-       APP_SYS = 7, APP_SERIES = 8, APP_LOGS = 9, APP_TRACES = 10, APP_MAX = 10 };
+       APP_SYS = 7, APP_SERIES = 8, APP_LOGS = 9, APP_TRACES = 10, APP_SCENE3D = 11, APP_MAX = 11 };
 enum { VIEW_FOCUS = 0, VIEW_OVERVIEW = 1, VIEW_BACK = 2, VIEW_TIMELINE = 3, VIEW_WORKSPACES = 4 };
 enum { NODE_SLOT = 1, NODE_TILE = 2, NODE_GHOST = 3, NODE_LINK = 4, NODE_EVENT = 5, NODE_WORKSPACE = 6 };
 enum { FLAG_SELECTED = 1, FLAG_IN_VIEWPORT = 2, FLAG_ACTIVE_WS = 4 };
@@ -122,6 +122,12 @@ void kijo_reset(void) {
     put(3,3,1,16,REAL,IDLE,0,16,++transaction_id,APP_LOGS);
     put(3,3,2,17,REAL,IDLE,0,17,++transaction_id,APP_TRACES);
     sel_x[3] = 1; sel_y[3] = 1; view_x[3] = 1; view_y[3] = 1;
+    // Workspace 5: a 3D surface tile next to text and charts (a rich surface coexisting with text surfaces).
+    put(4,1,1,18,REAL,IDLE,0,18,++transaction_id,APP_SCENE3D);
+    put(4,2,1,19,REAL,IDLE,0,19,++transaction_id,APP_LOGS);
+    put(4,1,2,20,REAL,IDLE,0,20,++transaction_id,APP_SERIES);
+    put(4,2,2,21,REAL,IDLE,0,21,++transaction_id,APP_SERIES);
+    sel_x[4] = 1; sel_y[4] = 1; view_x[4] = 1; view_y[4] = 1;
     log_event(EV_RESET, 0, 0, 0);
 }
 

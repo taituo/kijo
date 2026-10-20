@@ -5,6 +5,7 @@
 // The heatmap is monochrome by design; theme tint comes from blend constants.
 const FLOATS = 16; // rect4 color4 uv4 params4
 import { FONTS } from './fonts.mjs';
+import { buildSurface } from './surface3d.mjs';
 const FIRST = 32, LAST = 126, ATLAS_W = 2048;
 
 // Glyph atlas: one entry per (font, device-pixel size), with the real advance of every glyph so
@@ -50,7 +51,7 @@ class GlyphAtlas {
   }
 }
 
-export async function createGpuRenderer(canvas, { sceneWGSL, heatWGSL }) {
+export async function createGpuRenderer(canvas, { sceneWGSL, heatWGSL, surfaceWGSL }) {
   if (!globalThis.navigator?.gpu) return null;
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'low-power' });
   if (!adapter) return null;
@@ -98,6 +99,20 @@ export async function createGpuRenderer(canvas, { sceneWGSL, heatWGSL }) {
   });
   const heatAdd = heatPipe('add'), heatSub = heatPipe('reverse-subtract');
 
+  // 3D surface tiles: own pass with a depth buffer, scissored to the tile (web/surface3d.mjs builds vertices).
+  const S3_SLOTS = 16; let s3 = null, s3Buf = null, s3Cap = 0, depthTex = null;
+  if (surfaceWGSL) {
+    const mod = device.createShaderModule({ code: surfaceWGSL });
+    const bgl = device.createBindGroupLayout({ entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { hasDynamicOffset: true } }] });
+    const ubuf = device.createBuffer({ size: 256 * S3_SLOTS, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const layout = device.createPipelineLayout({ bindGroupLayouts: [bgl] });
+    const buffers = [{ arrayStride: 28, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }, { shaderLocation: 1, offset: 12, format: 'float32x4' }] }];
+    const pipe = (entry, topology, write, compare) => device.createRenderPipeline({ layout, vertex: { module: mod, entryPoint: 'vs', buffers },
+      fragment: { module: mod, entryPoint: entry, targets: [{ format, blend: alphaBlend }] }, primitive: { topology },
+      depthStencil: { format: 'depth24plus', depthWriteEnabled: write, depthCompare: compare } });
+    s3 = { ubuf, bg: device.createBindGroup({ layout: bgl, entries: [{ binding: 0, resource: { buffer: ubuf, size: 80 } }] }), tri: pipe('fs_tri', 'triangle-list', true, 'less'), line: pipe('fs_line', 'line-list', false, 'less-equal') };
+  }
+
   function syncAtlas() {
     if (!atlas.dirty && atlasTex) return;
     atlas.rasterize();
@@ -129,6 +144,7 @@ export async function createGpuRenderer(canvas, { sceneWGSL, heatWGSL }) {
         data.set([x, y, w, h, c[0], c[1], c[2], c[3] ?? 1, uv[0], uv[1], uv[2], uv[3], mode, t, d, r], n * FLOATS); n++;
       };
       const R = v => Math.round(v * dpr);
+      const s3Geo = []; let s3Bytes = 0;
       for (const k of cmds) {
         const r = Math.round((k.r || 0) * dpr), box = [R(k.x), R(k.y), R(k.x + k.w) - R(k.x), R(k.y + k.h) - R(k.y)];
         if (k.op === 'fill') push(...box, k.c, 0, 0, 0, undefined, r);
@@ -144,6 +160,12 @@ export async function createGpuRenderer(canvas, { sceneWGSL, heatWGSL }) {
             if (ch !== ' ') push(Math.round(x), y, e.cw, e.ch, k.c, 3, 0, 0, [g.u, g.v, e.cw, e.ch]);
             x += g.adv;
           }
+        } else if (k.op === 'scene3d' && s3 && s3Geo.length < S3_SLOTS) {
+          const geo = buildSurface({ ...k, aspect: k.w / k.h }), slot = s3Geo.length;
+          s3Geo.push({ geo, triOff: s3Bytes, lineOff: s3Bytes + geo.tri.byteLength }); s3Bytes += geo.tri.byteLength + geo.line.byteLength;
+          segs.push({ kind: 'inst', first: segStart, count: n - segStart });
+          segs.push({ kind: 's3', slot, rect: [R(k.x), R(k.y), R(k.w), R(k.h)] });
+          segStart = n;
         } else if (k.op === 'heat' && heatIdx < HEAT_SLOTS) {
           segs.push({ kind: 'inst', first: segStart, count: n - segStart });
           segs.push({ kind: 'heat', slot: heatIdx++, rect: [R(k.x), R(k.y), R(k.w), R(k.h)], activity: k.activity });
@@ -166,13 +188,22 @@ export async function createGpuRenderer(canvas, { sceneWGSL, heatWGSL }) {
       for (const s of segs) if (s.kind === 'heat')
         device.queue.writeBuffer(heatBuf, s.slot * 256, new Float32Array([time, theme.name === 'dark' || theme.glass ? 0.55 : 0.4, s.activity, dpr]));
 
+      if (s3Geo.length) {
+        if (!s3Buf || s3Cap < s3Bytes) { s3Buf?.destroy(); s3Cap = Math.max(1 << 20, s3Bytes * 2); s3Buf = device.createBuffer({ size: s3Cap, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST }); }
+        if (!depthTex || depthTex.width !== W || depthTex.height !== H) { depthTex?.destroy(); depthTex = device.createTexture({ size: [W, H], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT }); }
+        s3Geo.forEach((g, i) => {
+          device.queue.writeBuffer(s3Buf, g.triOff, g.geo.tri); device.queue.writeBuffer(s3Buf, g.lineOff, g.geo.line);
+          device.queue.writeBuffer(s3.ubuf, i * 256, new Float32Array([...g.geo.mvp, ...g.geo.light]));
+        });
+      }
       const enc = device.createCommandEncoder();
       const bg = theme.bg;
       // Capture renders the same frame offscreen, independent of presentation.
       const target = pending ? device.createTexture({ size: [W, H], format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC })
         : context.getCurrentTexture();
-      const pass = enc.beginRenderPass({ colorAttachments: [{ view: target.createView(),
-        clearValue: { r: bg[0], g: bg[1], b: bg[2], a: 1 }, loadOp: 'clear', storeOp: 'store' }] });
+      const targetView = target.createView();
+      const begin = load => enc.beginRenderPass({ colorAttachments: [{ view: targetView, clearValue: { r: bg[0], g: bg[1], b: bg[2], a: 1 }, loadOp: load ? 'load' : 'clear', storeOp: 'store' }] });
+      let pass = begin(false);
       const tint = theme.name === 'dark' || theme.glass ? theme.blue : theme.blue.map((c, i) => i < 3 ? 1 - c : 1);
       for (const s of segs) {
         if (s.kind === 'inst') {
@@ -180,6 +211,18 @@ export async function createGpuRenderer(canvas, { sceneWGSL, heatWGSL }) {
           pass.setViewport(0, 0, W, H, 0, 1); pass.setScissorRect(0, 0, W, H);
           pass.setPipeline(scenePipe); pass.setBindGroup(0, sceneBG); pass.setVertexBuffer(0, instBuf);
           pass.draw(6, s.count, 0, s.first);
+        } else if (s.kind === 's3') {
+          let [x, y, w, h] = s.rect; x = Math.max(0, x); y = Math.max(0, y); w = Math.min(W - x, w); h = Math.min(H - y, h);
+          if (w < 2 || h < 2) continue;
+          pass.end();
+          const g = s3Geo[s.slot], p3 = enc.beginRenderPass({ colorAttachments: [{ view: targetView, loadOp: 'load', storeOp: 'store' }],
+            depthStencilAttachment: { view: depthTex.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'discard' } });
+          p3.setViewport(x, y, w, h, 0, 1); p3.setScissorRect(x, y, w, h);
+          p3.setBindGroup(0, s3.bg, [s.slot * 256]); p3.setVertexBuffer(0, s3Buf, g.triOff, g.geo.tri.byteLength);
+          p3.setPipeline(s3.tri); p3.draw(g.geo.triCount);
+          p3.setVertexBuffer(0, s3Buf, g.lineOff, g.geo.line.byteLength); p3.setPipeline(s3.line); p3.draw(g.geo.lineCount);
+          p3.end();
+          pass = begin(true);
         } else {
           let [x, y, w, h] = s.rect;
           x = Math.max(0, x); y = Math.max(0, y); w = Math.min(W - x, w); h = Math.min(H - y, h);

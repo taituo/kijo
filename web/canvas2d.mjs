@@ -2,6 +2,7 @@
 // without WebGPU (e.g. disabled GPU, older Chrome). Same output, no shaders:
 // the activity material degrades to a slow soft pulse.
 import { FONTS } from './fonts.mjs';
+import { buildSurface, s3Project } from './surface3d.mjs';
 const css = c => `rgba(${Math.round(c[0] * 255)},${Math.round(c[1] * 255)},${Math.round(c[2] * 255)},${c[3] ?? 1})`;
 
 export function createCanvasRenderer(canvas) {
@@ -30,6 +31,18 @@ export function createCanvasRenderer(canvas) {
             const cx = (fx + 0.05 * Math.sin(t * 5 + i)) * W, cy = (fy + 0.05 * Math.cos(t * 4 + i * 2)) * H, g = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(W, H) * 0.55);
             g.addColorStop(0, col + Math.round(a * 255).toString(16).padStart(2, '0')); g.addColorStop(1, col + '00'); ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
           });
+        } else if (k.op === 'scene3d') { // painter's algorithm over the same geometry the GPU pass uses
+          const g = buildSurface({ ...k, aspect: k.w / k.h }), P = (i, tri) => s3Project(g.mvp, tri[i * 7], tri[i * 7 + 1], tri[i * 7 + 2]), polys = [];
+          for (let i = 0; i < g.triCount; i += 3) { const a = P(i, g.tri), b = P(i + 1, g.tri), c = P(i + 2, g.tri); if (a && b && c) polys.push({ i, a, b, c, d: (a[2] + b[2] + c[2]) / 3 }); }
+          polys.sort((p, q) => q.d - p.d);
+          ctx.save(); ctx.beginPath(); ctx.rect(k.x, k.y, k.w, k.h); ctx.clip();
+          const X = p => k.x + (p[0] * 0.5 + 0.5) * k.w, Y = p => k.y + (0.5 - p[1] * 0.5) * k.h;
+          for (const p of polys) {
+            const sh = 0.55 + 0.45 * Math.min(1, Math.abs((p.b[0] - p.a[0]) * (p.c[1] - p.a[1]) - (p.b[1] - p.a[1]) * (p.c[0] - p.a[0])) * 40), o = p.i * 7 + 3;
+            ctx.fillStyle = css([g.tri[o] * sh, g.tri[o + 1] * sh, g.tri[o + 2] * sh, 0.96]); ctx.beginPath(); ctx.moveTo(X(p.a), Y(p.a)); ctx.lineTo(X(p.b), Y(p.b)); ctx.lineTo(X(p.c), Y(p.c)); ctx.fill();
+          }
+          ctx.lineWidth = 1; for (let i = 0; i < g.lineCount; i += 2) { const a = P(i, g.line), b = P(i + 1, g.line); if (!a || !b) continue; ctx.strokeStyle = css([1, 1, 1, g.line[i * 7 + 6]]); ctx.beginPath(); ctx.moveTo(X(a), Y(a)); ctx.lineTo(X(b), Y(b)); ctx.stroke(); }
+          ctx.restore();
         } else if (k.op === 'glass') {
           ctx.save(); ctx.shadowColor = 'rgba(0,0,0,0.35)'; ctx.shadowBlur = 24; ctx.shadowOffsetY = 8;
           ctx.fillStyle = css([0.18 + k.c[0] * 0.2, 0.19 + k.c[1] * 0.2, 0.28 + k.c[2] * 0.2, 0.62 * (k.c[3] ?? 1)]); rr(k.x, k.y, k.w, k.h, k.r || 0); ctx.fill(); ctx.restore();

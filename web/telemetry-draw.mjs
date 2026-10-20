@@ -106,6 +106,26 @@ export function drawChart(c, measure, T, r, store, keys, windowMs, now, opts = {
   }
 }
 
+// Height-field model for the 3D surface tile: rows = series, columns = time, values 0..1.
+// Percent series use their natural 0..100 scale; everything else is min-max normalised per series,
+// and the model says which, so the tile can state it instead of implying a shared axis.
+export function surfaceModel(store, keys, windowMs, now, cols = 48) {
+  let ks = keys.filter(k => store.series.has(k));
+  if (!ks.length) {
+    const names = store.names(), cores = names.filter(n => n.startsWith('cpu.core_pct{')), pct = names.filter(n => store.series.get(n).unit === '%' && !n.startsWith('cpu.core_pct{'));
+    ks = (cores.length >= 2 ? cores : cores.concat(pct)).slice(0, 16);
+    if (!ks.length) ks = names.filter(n => !n.startsWith('kijod.')).slice(0, 10);
+  }
+  const vals = new Float32Array(ks.length * cols); let allPct = true;
+  ks.forEach((k, r) => {
+    const col = tdColumns(store, k, windowMs, now, cols), unit = store.series.get(k).unit; if (unit !== '%') allPct = false;
+    if (!col) return;
+    let prev = null, lo = Infinity, hi = -Infinity; for (const v of col.out) if (v != null) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+    for (let i = 0; i < cols; i++) { const v = col.out[i] ?? prev; prev = v; vals[r * cols + i] = v == null ? 0 : unit === '%' ? v / 100 : (v - lo) / (hi - lo || 1); }
+  });
+  return { keys: ks, rows: ks.length, cols, vals, norm: ks.length && allPct ? 'percent 0-100' : 'per-series min-max' };
+}
+
 export const shortName = key => key.replace(/\{.*\}$/, '');
 
 // Compact sparkline + big number, for overview cells.

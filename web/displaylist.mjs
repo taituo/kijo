@@ -6,7 +6,7 @@
 // zone, workspace pills with attention marks, proportional type for titles, mono for data,
 // tokens for radius/gap so theming later changes values, not code.
 import { NODE, FLAG, STATUS, BLOCKED_KIND, APP, SCALE, EVENT, getScene, getTiles, getEvents, label, tag, selectedTile } from '../src/core.mjs';
-import { drawChart, drawSpark, drawLogs, drawTraces, drawSys, drawFlow, fmtVal, windowLabel, shortName } from './telemetry-draw.mjs';
+import { drawChart, drawSpark, drawLogs, drawTraces, drawSys, drawFlow, surfaceModel, fmtVal, windowLabel, shortName } from './telemetry-draw.mjs';
 import { baseName } from '../src/telemetry.mjs';
 
 const rgb = h => [parseInt(h.slice(1, 3), 16) / 255, parseInt(h.slice(3, 5), 16) / 255, parseInt(h.slice(5, 7), 16) / 255, 1];
@@ -102,6 +102,14 @@ export function buildDisplayList(api, st, env) {
   const scene = st.view === 'flow' ? [] : getScene(api, st.view);
   const store = env.store, now = env.now ?? Date.now(), winMs = st.window || 300000, bindings = st.bindings || {};
   // A binding may name a base series ('cpu.core_pct'); resolve it to concrete keys that exist.
+  // 3D surface op: data only (the renderer builds geometry). The camera auto-orbits until the user drags.
+  const cam = st.cam || {}, yaw = (cam.yaw ?? 0.6) + (cam.manual ? 0 : (env.time || 0) * 0.15);
+  const surface = (id, r, settle) => {
+    if (!store || settle < 0.95 || r.w < 24 || r.h < 24) return null;
+    const m = surfaceModel(store, [].concat(bindings[id] ?? []), winMs, now);
+    if (m.rows) cmds.push({ op: 'scene3d', x: r.x, y: r.y, w: r.w, h: r.h, rows: m.rows, cols: m.cols, vals: m.vals, yaw, pitch: cam.pitch ?? 0.5, dist: cam.dist ?? 2.7, ramp: [T.blue, T.yellow, T.red].map(c => c.slice(0, 3)) });
+    return m;
+  };
   const keysFor = id => [].concat(bindings[id] ?? []).flatMap(b => !store ? [] : store.series.has(b) ? [b] : [...store.series.keys()].filter(k => baseName(k) === b).slice(0, 1));
   const cur = api.kijo_special_open() ? -1 : api.kijo_ws();
   const wsIndex = api.kijo_special_open() ? 9 : api.kijo_ws();
@@ -231,7 +239,7 @@ export function buildDisplayList(api, st, env) {
         const editing = st.editing && st.editing.id === t.id;
         const title = isNote ? (editing ? 'editing note' : 'NOTE ' + t.id) : label(t, st.notes, bindings);
         c.text(x + ip + bs + 10, y + ip + 1, title, 15, editing ? T.blue : fg, { f: 'sans', w: 600, max: w - ip * 2 - bs - 110 });
-        const state = t.app >= APP.SYS ? (t.app === APP.SERIES ? windowLabel(winMs) : 'live') : STATUS[t.status] + (t.status === 2 && t.blockedKind ? ': ' + BLOCKED_KIND[t.blockedKind] : '');
+        const state = t.app >= APP.SYS ? (t.app === APP.SERIES || t.app === APP.SCENE3D ? windowLabel(winMs) : 'live') : STATUS[t.status] + (t.status === 2 && t.blockedKind ? ': ' + BLOCKED_KIND[t.blockedKind] : '');
         const sw = measure(state, 12) + 14;
         c.fill(x + w - ip - sw + 0, y + ip + 6, 6, 6, sc);
         c.text(x + w - ip - sw + 12 - 0, y + ip + 3, state, 12, sc === T.dim ? T.dim : sc, { max: sw });
@@ -257,6 +265,16 @@ export function buildDisplayList(api, st, env) {
         } else if (t.app === APP.METRICS) {
           const rows = [['cores', M2.cores], ['memory', M2.memory], ['frame rate', M2.fps != null ? M2.fps + ' fps' : null], ['renderer', M2.gpu], ['cpu load', M2.cpu != null ? M2.cpu + '%' : 'needs kijod'], ['ram used', M2.ram != null ? M2.ram + '%' : 'needs kijod']];
           rows.forEach(([k, v], i) => { c.text(x + ip, by + i * 20, k, 12, T.dim); c.text(x + ip + 100, by + i * 20, String(v ?? '-'), 12, fg, { w: 600, max: bw - 100 }); });
+        } else if (t.app === APP.SCENE3D) {
+          const cr = { x: x + ip, y: y + ip + bs + 10, w: bw, h: Math.max(20, h - (ip * 2 + bs + 10) - 34) };
+          const m = surface(t.id, cr, r.settle);
+          if (!store) c.text(cr.x, cr.y, 'no telemetry store in this host', 12, sub);
+          else if (m && !m.rows) { c.text(cr.x, cr.y, 'no series to plot', 13, fg, { f: 'sans', w: 500 }); c.text(cr.x, cr.y + 22, 'inject metrics, or run kijod (host cores)', 12, sub, { max: bw }); }
+          if (m && m.rows) {
+            const bases = [...new Set(m.keys.map(shortName))], rl = k => (k.match(/\{(.*)\}/)?.[1] || k).replace(/"/g, '').replace(/=/g, ' ');
+            c.text(x + ip, y + h - ip - 28, 'rows: ' + (bases.length === 1 ? bases[0] + '  ' + m.keys.map(rl).join('  ') : m.keys.map(shortName).join('  ')), 11, sub, { max: bw });
+            c.text(x + ip, y + h - ip - 12, `x time -${windowLabel(winMs)}..now   y ${m.norm}   drag to orbit, double-click to spin`, 10, T.dim, { max: bw });
+          }
         } else if (t.app >= APP.SYS) {
           const cr = { x: x + ip, y: y + ip + bs + 12, w: bw, h: Math.max(20, h - (ip * 2 + bs + 12)) };
           if (!store) c.text(cr.x, cr.y, 'no telemetry store in this host', 12, sub);
@@ -279,6 +297,7 @@ export function buildDisplayList(api, st, env) {
           c.text(x + ip, y + 6, `${tag(t)} ${t.id}`, 11, fg, { w: 600, max: w - ip * 2 });
           if (t.app >= APP.SYS && store) {
             const cr = { x: x + ip, y: y + 22, w: w - ip * 2, h: h - 28 };
+            if (t.app === APP.SCENE3D) surface(t.id, cr, r.settle); else
             if (t.app === APP.SERIES) { const k = keysFor(t.id)[0]; if (k && cr.h > 10) { if (cr.h > 26) c.text(x + ip + measure(`${tag(t)} ${t.id}  `, 11, 'mono', 600), y + 6, shortName(k), 10, sub, { max: w - ip * 2 - 40 }); drawSpark(c, measure, T, cr, store, k, winMs, now); } else if (!k) c.text(cr.x, cr.y, 'unbound', 10, sub); }
             else if (t.app === APP.LOGS && cr.h > 12) drawLogs(c, measure, T, cr, store, now, { mini: true });
             else if (t.app === APP.TRACES && cr.h > 12) drawTraces(c, measure, T, cr, store, now, { mini: true });
