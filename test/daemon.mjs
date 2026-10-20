@@ -72,5 +72,40 @@ assert.equal((await fetch(base + '/api/session/x', { method: 'PUT', headers: H, 
 const pre = await fetch(base + '/ingest', { method: 'OPTIONS', headers: { origin: 'null' } }); assert.equal(pre.status, 204);
 assert.equal(pre.headers.get('access-control-allow-origin'), 'null');
 
+// ---- PTY: refused by default (shell access is opt-in) ...
+assert.equal((await post('/pty/open', '{}')).status, 403, 'no shell unless the operator enabled it');
 ac.abort(); await d.close();
-console.log('PASS — kijod: auth, DNS-rebinding guard, text/Prometheus/OTLP ingest, request tracing, SSE snapshot+live, collector, sessions');
+
+// ---- ... and a real shell when enabled
+const ds = await startDaemon({ port: 0, token: 'tok2', collect: false, ui: '<!doctype html>', quiet: true, shell: true });
+{
+  const b2 = `http://127.0.0.1:${ds.port}`, H2 = { authorization: 'Bearer tok2' };
+  const sse = new AbortController(), res = await fetch(b2 + '/events', { headers: H2, signal: sse.signal });
+  const reader = res.body.getReader(), dec = new TextDecoder(); let buf = '', out = '', snap = null, exit = null;
+  (async () => { try { for (;;) { const { value, done } = await reader.read(); if (done) break; buf += dec.decode(value, { stream: true }); let i;
+    while ((i = buf.indexOf('\n\n')) >= 0) { const f = buf.slice(0, i); buf = buf.slice(i + 2); const ev = f.match(/^event: (.*)$/m)?.[1], dj = f.match(/^data: (.*)$/m)?.[1]; if (!dj) continue;
+      const j = JSON.parse(dj); if (ev === 'snapshot') snap = j; if (ev === 'pty') { if (j.d) out += Buffer.from(j.d, 'base64').toString('latin1'); if ('exit' in j) exit = j.exit; } } } } catch {} })();
+  const until = async (fn, ms = 6000) => { const t = Date.now(); while (!fn()) { if (Date.now() - t > ms) throw new Error('timeout; out=' + JSON.stringify(out.slice(-200))); await new Promise(r => setTimeout(r, 25)); } };
+  await until(() => snap); assert.equal(snap.shell, true, 'snapshot advertises shell capability');
+  const p2 = (path, body) => fetch(b2 + path, { method: 'POST', body, headers: H2 });
+  assert.equal((await fetch(b2 + '/pty/open', { method: 'POST', body: '{}' })).status, 401);
+  const { id } = await (await p2('/pty/open', JSON.stringify({ cols: 100, rows: 30 }))).json(); assert.ok(id > 0);
+  assert.equal((await p2(`/pty/${id}/in`, 'x'.repeat(70000))).status, 413, 'input size is capped');
+  assert.equal((await p2('/pty/999/in', 'x')).status, 404);
+  await p2(`/pty/${id}/in`, 'stty size; echo KIJO_$((6*7))_OK\n');
+  await until(() => /KIJO_42_OK/.test(out));
+  assert.match(out, /30 100/, 'the shell sees the requested size');
+  await p2(`/pty/${id}/resize`, JSON.stringify({ cols: 90, rows: 20 })); await p2(`/pty/${id}/in`, 'stty size\n');
+  await until(() => /20 90/.test(out));
+  assert.match(out, /\x1b|\$|#|%/, 'raw terminal bytes, prompt included');
+  await p2(`/pty/${id}/in`, 'exit 3\n'); await until(() => exit !== null); assert.equal(exit, 3, 'exit status is reported');
+  // a second client attaching mid-session gets the replay buffer
+  const { id: id2 } = await (await p2('/pty/open', '{}')).json(); await p2(`/pty/${id2}/in`, 'echo REPLAY_MARK\n'); await until(() => /REPLAY_MARK/.test(out));
+  const r2 = await fetch(b2 + '/events', { headers: H2 }), rd2 = r2.body.getReader(); const first = new TextDecoder().decode((await rd2.read()).value);
+  const sj = JSON.parse(first.match(/^data: (.*)$/m)[1]); assert.equal(sj.ptys.length, 1); assert.match(Buffer.from(sj.ptys[0].d, 'base64').toString(), /REPLAY_MARK/); rd2.cancel();
+  // no attached browser -> shells are reaped
+  sse.abort(); await new Promise(r => setTimeout(r, 100));
+  await ds.close();
+}
+
+console.log('PASS — kijod: auth, DNS-rebinding guard, text/Prometheus/OTLP ingest, request tracing, SSE snapshot+live, collector, sessions, PTY opt-in (403 by default; real shell, size, resize, exit, replay, input cap)');

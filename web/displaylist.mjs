@@ -9,6 +9,7 @@ import { NODE, FLAG, STATUS, BLOCKED_KIND, APP, SCALE, EVENT, getScene, getTiles
 import { drawChart, drawSpark, drawLogs, drawTraces, drawSys, drawFlow, surfaceModel, fmtVal, windowLabel, shortName } from './telemetry-draw.mjs';
 import { baseName } from '../src/telemetry.mjs';
 import { selection } from './textsel.mjs';
+import { drawTerm } from './terminal.mjs';
 
 const rgb = h => [parseInt(h.slice(1, 3), 16) / 255, parseInt(h.slice(3, 5), 16) / 255, parseInt(h.slice(5, 7), 16) / 255, 1];
 const base = { radius: 6, gap: 10, bar: 38, hint: 28 };
@@ -57,6 +58,7 @@ const ago = ms => (ms < 60000 ? `${Math.round(ms / 1000)}s` : `${Math.round(ms /
 // st:  { view, ghosts, notes, events, editing:{id,text}|null, palette:{q,items,sel}|null, message }
 // env: { width, height, time, dt, theme, backend, clock, date, metrics, measure(str,size,font,weight), anim, dpr }
 export function buildDisplayList(api, st, env) {
+  const termSizes = {};
   let curSurf = 0; // text drawn while this is set belongs to one selectable surface (a tile)
   const T = env.theme, cmds = [], hits = [], dt = env.dt ?? 1 / 60, W = env.width, H = env.height;
   const anim = env.anim || new Anim(); anim.begin();
@@ -71,14 +73,14 @@ export function buildDisplayList(api, st, env) {
       stroke: (x, y, w, h, c, t = 1, r = 0) => cmds.push({ op: 'stroke', x, y, w, h, c: A(c, al), t, r }),
       dash: (x, y, w, h, c, t = 1, d = 8, r = 0) => cmds.push({ op: 'dash', x, y, w, h, c: A(c, al), t, d, r }),
       heat: (x, y, w, h, act = 1) => cmds.push({ op: 'heat', x, y, w, h, activity: act * al }),
-      text(x, y, str, size, c, { f = 'mono', w = 400, max = Infinity } = {}) {
+      text(x, y, str, size, c, { f = 'mono', w = 400, max = Infinity, term = false } = {}) {
         str = String(str).replace(/[^\x20-\x7e]/g, '?');
         if (measure(str, size, f, w) > max) {
           let lo = 0, hi = str.length;
           while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (measure(str.slice(0, mid) + '..', size, f, w) <= max) lo = mid; else hi = mid - 1; }
           str = lo > 0 ? str.slice(0, lo) + '..' : '';
         }
-        if (str) cmds.push({ op: 'text', x, y, s: size, c: A(c, al), str, f, w, surf: curSurf || undefined });
+        if (str) cmds.push({ op: 'text', x, y, s: size, c: A(c, al), str, f, w, surf: curSurf || undefined, ...(term ? { term: true } : {}) });
         return measure(str, size, f, w);
       },
       wrap(x, y, str, size, c, maxW, maxLines, lh, opts = {}) {
@@ -213,7 +215,7 @@ export function buildDisplayList(api, st, env) {
     hits.push({ kind: 'tile', meta: n.meta, x, y, w, h });
     const rad = focus ? T.radius : Math.min(T.radius, 4), ip = focus ? clamp(w * 0.045, 12, 22) : 7;
     const show = clamp(r.settle, 0, 1), c = mk(r.a * show); // content fades in as the glide settles
-    const ring = () => { if (selected) { a.stroke(x - 3, y - 3, w + 6, h + 6, T.ink, 2, rad + 3); } };
+    const ring = () => { if (selected) { a.stroke(x - 3, y - 3, w + 6, h + 6, st.capture === t.id ? T.blue : T.ink, st.capture === t.id ? 3 : 2, rad + 3); } };
 
     if (n.kind === NODE.TILE) {
       const sc = statusColor(T, n.status), isNote = t.app === APP.NOTE;
@@ -241,7 +243,8 @@ export function buildDisplayList(api, st, env) {
         const editing = st.editing && st.editing.id === t.id;
         const title = isNote ? (editing ? 'editing note' : 'NOTE ' + t.id) : label(t, st.notes, bindings);
         c.text(x + ip + bs + 10, y + ip + 1, title, 15, editing ? T.blue : fg, { f: 'sans', w: 600, max: w - ip * 2 - bs - 110 });
-        const state = t.app >= APP.SYS ? (t.app === APP.SERIES || t.app === APP.SCENE3D ? windowLabel(winMs) : 'live') : STATUS[t.status] + (t.status === 2 && t.blockedKind ? ': ' + BLOCKED_KIND[t.blockedKind] : '');
+        const stm = t.app === APP.SHELL ? st.terms?.get(t.id) : null, capt = st.capture === t.id;
+        const state = stm ? (capt ? 'keys > shell  ^] release' : stm.exited !== null ? 'exited ' + stm.exited : stm.view > 0 ? 'scrollback -' + stm.view : 'live') : t.app >= APP.SYS ? (t.app === APP.SERIES || t.app === APP.SCENE3D ? windowLabel(winMs) : 'live') : STATUS[t.status] + (t.status === 2 && t.blockedKind ? ': ' + BLOCKED_KIND[t.blockedKind] : '');
         const sw = measure(state, 12) + 14;
         c.fill(x + w - ip - sw + 0, y + ip + 6, 6, 6, sc);
         c.text(x + w - ip - sw + 12 - 0, y + ip + 3, state, 12, sc === T.dim ? T.dim : sc, { max: sw });
@@ -258,9 +261,22 @@ export function buildDisplayList(api, st, env) {
           if (!editing) c.text(x + ip, foot, '[E] write   [X] close', 11, T.dim, { max: bw });
           else c.text(x + ip, foot, 'esc saves   enter = new line', 11, T.blue, { max: bw });
         } else if (t.app === APP.SHELL) {
-          c.text(x + ip, by, 'no PTY attached', 13, fg, { f: 'sans', w: 500 });
-          c.text(x + ip, by + 22, 'start the daemon:  node src/kijod.mjs', 12, sub, { max: bw });
-          c.text(x + ip, by + 42, 'terminal host:  node src/host.mjs  [P]', 12, sub, { max: bw });
+          const tm = st.terms?.get(t.id), dm = env.daemon;
+          if (tm?.vt) {
+            const cr = { x: x + ip, y: by - 6, w: bw, h: Math.max(20, h - (by - 6 - y) - ip - (t.progress > 0 || t.status === 1 ? 10 : 2) - (h > 230 ? 18 : 0)) };
+            if (r.settle > 0.95) termSizes[t.id] = drawTerm(c, measure, T, cr, tm, { captured: st.capture === t.id });
+          } else if (dm && dm.state === 'connected' && dm.shell) {
+            c.text(x + ip, by, 'shell ready on ' + (dm.host || 'kijod'), 13, fg, { f: 'sans', w: 500 });
+            c.text(x + ip, by + 22, 'press Enter to open it; keys then go to the shell, Ctrl+] gives them back', 12, sub, { max: bw });
+          } else if (dm && dm.state === 'connected') {
+            c.text(x + ip, by, 'shell access is off on this kijod', 13, fg, { f: 'sans', w: 500 });
+            c.text(x + ip, by + 22, 'restart it with  --allow-shell  (anyone with the token can then run commands)', 12, sub, { max: bw });
+          } else {
+            c.text(x + ip, by, 'no PTY attached', 13, fg, { f: 'sans', w: 500 });
+            c.text(x + ip, by + 22, 'on the host:  node src/kijod.mjs --allow-shell', 12, sub, { max: bw });
+            c.text(x + ip, by + 42, 'then palette:  kijod <url> <token>', 12, sub, { max: bw });
+            c.text(x + ip, by + 62, 'terminal host:  node src/host.mjs  [P]', 12, sub, { max: bw });
+          }
         } else if (t.app === APP.AGENT) {
           c.text(x + ip, by, 'simulated agent', 13, fg, { f: 'sans', w: 500 });
           c.text(x + ip, by + 22, 'not running - state is set locally', 12, sub, { max: bw });
@@ -428,6 +444,8 @@ export function buildDisplayList(api, st, env) {
   // ---------------------------------------------------------------- hint line
   const ctxHint = (() => {
     if (st.editing) return 'writing   esc save   enter newline   backspace delete';
+    if (st.capture) return 'keys go to the shell   ctrl+] release   ctrl+shift+c copy   ctrl+shift+v paste   wheel / shift+pgup scroll';
+    if (sel.app === APP.SHELL && st.terms?.has(sel.id)) return 'enter or click captures keys   drag selects text   wheel scrolls   X close';
     if (st.view === 'workspaces') return 'click or , . to switch   enter opens   S scratchpad   M move tile on';
     if (st.view === 'back' || st.view === 'timeline') return 'arrows move   1-6 views   / search';
     if (st.view === 'flow') return 'click a series to pin a chart   click a tile to go there   paste data to inject';
@@ -470,5 +488,5 @@ export function buildDisplayList(api, st, env) {
     const at = cmds.findIndex(k => k.op === 'text' && k.surf === st.sel.surf);
     if (at >= 0) cmds.splice(at, 0, ...r.rects.map(q => ({ op: 'fill', x: q.x, y: q.y, w: q.w, h: q.h, c: A(T.blue, 0.38), r: 2 })));
   }
-  return { cmds, hits, animating: anim.moving, selectionText };
+  return { cmds, hits, animating: anim.moving, selectionText, termSizes };
 }

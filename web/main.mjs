@@ -5,6 +5,7 @@ import { instantiateCore, getTiles, serializeState, applyState, selectedTile, di
 import { Store, baseName } from '../src/telemetry.mjs';
 import { startBrowserInjector, installInjectors, Sources, injectInto } from './injectors.mjs';
 import { connectDaemon } from './daemon.mjs';
+import { VT, encodeKey } from '../src/vt.mjs';
 import { WINDOWS, windowLabel } from './telemetry-draw.mjs';
 import { buildDisplayList, THEMES, Anim, WALLPAPERS } from './displaylist.mjs';
 import { createGpuRenderer } from './gpu.mjs';
@@ -68,7 +69,7 @@ async function boot() {
   let drawAcc = 0, drawN = 0, lastCmds = 0;
   const probe = { gpu: () => metrics.gpu, sample: () => { const o = { fps: metrics.fps, drawMs: drawN ? Math.round(drawAcc / drawN * 100) / 100 : 0, cmds: lastCmds }; drawAcc = 0; drawN = 0; return o; } };
   startBrowserInjector(store, probe);
-  installInjectors(store, { notify: say, canPaste: () => !st.editing && !st.palette });
+  installInjectors(store, { notify: say, canPaste: () => !st.editing && !st.palette && !st.capture });
   const sources = new Sources(store, say);
   addEventListener('paste', e => { if (!st.palette) return; const t = (e.clipboardData?.getData('text/plain') || '').split('\n')[0].slice(0, 300); if (t) { st.palette.q += t; refresh(); e.preventDefault(); } });
   const dstate = { state: 'off' };
@@ -76,9 +77,9 @@ async function boot() {
     daemon?.close(); url = url.replace(/\/$/, '');
     try { sessionStorage.setItem('kijo.daemon', JSON.stringify({ url, token })); } catch {}
     let first = true;
-    daemon = connectDaemon({ url, token, store, onState: s => { dstate.state = s; if (s === 'connected' && first) { first = false; log('kijod connected ' + url); if (!restored) daemon.loadSession().then(j => { if (j && j.version === 2) { try { st.notes = applyState(api, j); st.bindings = j.bindings ?? st.bindings; say('layout loaded from kijod'); } catch {} } }); } if (s === 'unauthorized') say('kijod: wrong token'); }, onInfo: i => (dstate.host = i.host) });
+    daemon = connectDaemon({ url, token, store, onState: s => { dstate.state = s; if (s === 'connected' && first) { first = false; log('kijod connected ' + url); if (!restored) daemon.loadSession().then(j => { if (j && j.version === 2) { try { st.notes = applyState(api, j); st.bindings = j.bindings ?? st.bindings; say('layout loaded from kijod'); } catch {} } }); } if (s === 'unauthorized') say('kijod: wrong token'); }, onInfo: i => { dstate.host = i.host; dstate.shell = i.shell; }, onPty: onPty });
   }
-  function disconnect() { daemon?.close(); daemon = null; dstate.state = 'off'; try { sessionStorage.removeItem('kijo.daemon'); } catch {} }
+  function disconnect() { daemon?.close(); daemon = null; dstate.state = 'off'; dstate.shell = false; try { sessionStorage.removeItem('kijo.daemon'); } catch {} }
   // Same-origin relay: kijod prints  http://host:port/#token=...  - read it once, then drop it from the address bar.
   {
     let creds = null; const m = location.hash.match(/token=([^&]+)/);
@@ -115,6 +116,7 @@ async function boot() {
     for (let w = 0; w < 9; w++) items.push({ title: `Move selected tile to workspace ${w + 1}`, hint: 'alt+shift+' + (w + 1), run: () => { if (dispatch(api, 'MOVETOWORKSPACE', w)) log(`Moved tile to workspace ${w + 1}`); else say('Nothing to move, or the workspace is full'); } });
     for (const n of ['glass', 'dark', 'light']) items.push({ title: `Theme: ${n}`, hint: n === 'glass' ? 'W wallpaper' : '', run: () => { themeName = n; setPref('kijo.theme', n); } });
     WALLPAPERS.forEach((w, i) => items.push({ title: `Wallpaper: ${w.name}`, hint: 'glass', run: () => { themeName = 'glass'; setPref('kijo.theme', 'glass'); wallIx = i; applyWall(); } }));
+    if (dstate.shell) items.push({ title: 'Terminal: open shell', hint: 'kijod', run: () => { const e = shellTiles().find(x => !st.terms.has(x.t.id) || st.terms.get(x.t.id).exited !== null) || shellTiles()[0]; if (!e) return say('no shell tile (Reset demo workspace restores one)'); goTo(e.w, e.i % SIDE, Math.floor(e.i / SIDE)); enterTerm(e.t); } });
     items.push({ title: 'New note here', hint: 'N', run: () => handleKeyName(api, st, 'n') });
     items.push({ title: 'Reserve a 2x2 footprint here', hint: 'F', run: () => handleKeyName(api, st, 'f') });
     items.push({ title: 'Close selected tile', hint: 'X', run: () => handleKeyName(api, st, 'x') });
@@ -137,8 +139,79 @@ async function boot() {
   const runPalette = i => { const it = st.palette.items[i ?? st.palette.sel]; st.palette = null; if (it) { it.run(); save(); } };
 
   const clampI = (v, a, b) => Math.max(a, Math.min(b, v));
+
+  // ---- terminal tiles: a shell tile owns a VT grid fed by a kijod PTY (kijod must run with --allow-shell)
+  const termById = new Map(), orphans = new Map(); let opening = 0;
+  st.terms = new Map(); st.capture = null;
+  const unb64 = d => Uint8Array.from(atob(d), ch => ch.charCodeAt(0));
+  function makeTerm(tileId, id, cols, rows) {
+    const tm = { tile: tileId, id, view: 0, exited: null, want: null, wantAt: 0, vt: null, title: '' };
+    tm.vt = new VT({ cols, rows, onReply: reply => daemon?.ptyIn(id, reply), onTitle: t => (tm.title = t), onStatus: m => { api.kijo_report(tileId, m.state, m.kind, m.progress); } }); // OSC 7501 drives the tile status
+    st.terms.set(tileId, tm); termById.set(id, tm);
+    for (const m of orphans.get(id) || []) feedTerm(tm, m); orphans.delete(id);
+    return tm;
+  }
+  function feedTerm(tm, m) {
+    if (m.d) tm.vt.write(unb64(m.d));
+    if ('exit' in m) { tm.exited = m.exit; tm.vt.write(`\r\n[shell exited with status ${m.exit} - press Enter to start a new one]\r\n`); }
+  }
+  const shellTiles = () => { const out = []; for (let w = 0; w < 10; w++) getTiles(api, w).forEach((t, i) => { if (t.kind === 1 && t.app === APP.SHELL) out.push({ w, i, t }); }); return out; };
+  function onPty(m) {
+    if (m.snapshot) { // (re)connect: shells that outlived the page come back with their recent output
+      for (const p of m.snapshot) {
+        let tm = termById.get(p.id);
+        if (!tm) { const free = shellTiles().find(e => !st.terms.has(e.t.id)); if (!free) continue; tm = makeTerm(free.t.id, p.id, p.cols, p.rows); }
+        else { tm.vt.reset(); tm.vt.resize(p.cols, p.rows); }
+        if (p.d) tm.vt.write(unb64(p.d));
+      }
+      return;
+    }
+    const tm = termById.get(m.id);
+    if (tm) feedTerm(tm, m); else if (opening) { const l = orphans.get(m.id) || []; l.push(m); orphans.set(m.id, l); } // output raced ahead of the open() reply
+  }
+  async function enterTerm(t) {
+    const tm = st.terms.get(t.id);
+    if (tm && tm.exited === null) { st.capture = t.id; say('keys go to the shell; Ctrl+] gives them back'); return; }
+    if (!daemon || dstate.state !== 'connected') return say('no kijod attached: run  node src/kijod.mjs --allow-shell  and connect it (palette: kijod <url> <token>)');
+    if (!dstate.shell) return say('shell access is off on this kijod: restart it with --allow-shell');
+    opening++;
+    try {
+      const r = await daemon.ptyOpen(80, 24);
+      if (tm) { termById.delete(tm.id); st.terms.delete(t.id); }
+      makeTerm(t.id, r.id, 80, 24); st.capture = t.id; say('shell open; Ctrl+] gives the keys back');
+    } catch (e) { say('cannot open shell: ' + e.message); }
+    finally { opening--; }
+  }
+  const sendTerm = (tm, text) => { if (tm.exited === null) daemon?.ptyIn(tm.id, text); };
+  function captureKey(ev) {
+    const tm = st.terms.get(st.capture); if (!tm) { st.capture = null; return undefined; }
+    if (ev.ctrlKey && !ev.shiftKey && !ev.altKey && ev.key === ']') { st.capture = null; say('keys back to Kijo'); return true; }
+    const low = ev.key.length === 1 ? ev.key.toLowerCase() : '', cmd = ev.metaKey || (ev.ctrlKey && ev.shiftKey);
+    if (cmd && low === 'c') { if (st.sel && lastText) copySelection(); return true; }
+    if (cmd && low === 'v') return false; // the browser fires 'paste' for us
+    if (ev.metaKey) return false;
+    if (ev.shiftKey && (ev.key === 'PageUp' || ev.key === 'PageDown')) { tm.view = clampI(tm.view + (ev.key === 'PageUp' ? 1 : -1) * Math.max(1, tm.vt.rows - 1), 0, tm.vt.back.length); return true; }
+    if (tm.exited !== null) { if (ev.key === 'Enter') { const t = getTiles(api).find(x => x.id === st.capture); if (t) enterTerm(t); return true; } return false; }
+    const bytes = encodeKey(ev, tm.vt); if (!bytes) return false;
+    tm.view = 0; sendTerm(tm, bytes); return true;
+  }
+  addEventListener('paste', e => {
+    if (!st.capture || st.palette) return; const tm = st.terms.get(st.capture); if (!tm || tm.exited !== null) return;
+    const text = (e.clipboardData?.getData('text/plain') || '').replace(/\x1b/g, '').replace(/\r?\n/g, '\r'); if (!text) return;
+    sendTerm(tm, tm.vt.bracketed ? `\x1b[200~${text}\x1b[201~` : text); tm.view = 0; e.preventDefault();
+  });
+  // keep the PTY the size of its tile (debounced: tiles glide when layout changes)
+  function syncTerms(sizes, now) {
+    for (const [tileId, tm] of st.terms) {
+      const w = sizes[tileId]; if (!w || tm.exited !== null) continue;
+      if (w.cols === tm.vt.cols && w.rows === tm.vt.rows) { tm.want = null; continue; }
+      if (!tm.want || tm.want.cols !== w.cols || tm.want.rows !== w.rows) { tm.want = w; tm.wantAt = now; continue; }
+      if (now - tm.wantAt > 150) { tm.vt.resize(w.cols, w.rows); daemon?.ptyResize(tm.id, w.cols, w.rows); tm.want = null; }
+    }
+  }
   function act(ev) {
     const key = (ev.shiftKey && ev.key.startsWith('Arrow') ? 'Shift+' : '') + ev.key;
+    if (st.capture) { const r = captureKey(ev); if (r !== undefined) return r; }
     if (st.palette) {
       if (ev.key === 'Escape') st.palette = null;
       else if (ev.key === 'Enter') runPalette();
@@ -177,7 +250,8 @@ async function boot() {
     if (ev.key === 'w' && themeName === 'glass') { wallIx++; applyWall(); say('wallpaper: ' + WALLPAPERS[wallIx].name); return true; }
     if (ev.key === '[' || ev.key === ']') { const i = WINDOWS.indexOf(st.window); st.window = WINDOWS[clampI(i + (ev.key === ']' ? 1 : -1), 0, WINDOWS.length - 1)]; say('window ' + windowLabel(st.window)); save(); return true; }
     if (st.view === 'flow' && ev.key === 'Escape') { st.view = 'focus'; return true; }
-    if (ev.key === 'p' || ev.key === 'o') { say('A live shell needs the daemon: node src/kijod.mjs (terminal host: node src/host.mjs)'); return true; }
+    if (ev.key === 'Enter' && st.view === 'focus') { const t = selectedTile(api); if (t.kind === 1 && t.app === APP.SHELL) { enterTerm(t); return true; } }
+    if (ev.key === 'p' || ev.key === 'o') { say('select the shell tile and press Enter (needs kijod --allow-shell; terminal host: node src/host.mjs)'); return true; }
     const used = handleKeyName(api, st, key);
     if (used) save();
     return used;
@@ -232,12 +306,17 @@ async function boot() {
   canvas.addEventListener('pointermove', ev => {
     if (selDrag && (Math.hypot(ev.clientX - selDrag.ax, ev.clientY - selDrag.ay) > 4 || st.sel)) st.sel = { surf: selDrag.surf, ax: selDrag.ax, ay: selDrag.ay, bx: ev.clientX, by: ev.clientY, key: selDrag.key };
     if (!drag) return; st.cam.manual = true; st.cam.yaw = drag.yaw - (ev.clientX - drag.x) * 0.008; st.cam.pitch = Math.max(0.08, Math.min(1.45, drag.pitch + (ev.clientY - drag.y) * 0.006)); });
-  const endDrag = () => { drag = null; selDrag = null; if (st.sel && !lastText) st.sel = null; };
+  const endDrag = () => {
+    const sd = selDrag; drag = null; selDrag = null; if (st.sel && !lastText) st.sel = null;
+    if (sd && !st.sel && st.view === 'focus' && st.terms.has(sd.surf) && getTiles(api).some(t => t.id === sd.surf && t.app === APP.SHELL)) { const tm = st.terms.get(sd.surf); if (tm.exited === null) st.capture = sd.surf; } // a click (not a drag) on a live terminal captures keys
+  };
   canvas.addEventListener('pointerup', endDrag); canvas.addEventListener('pointercancel', endDrag);
-  canvas.addEventListener('dblclick', ev => { const h = hitAt(ev); if (h?.kind === 'tile' && getTiles(api)[h.meta]?.app === APP.SCENE3D) { st.cam.manual = false; return; } activate(h, true); });
+  canvas.addEventListener('dblclick', ev => { const h = hitAt(ev); { const ht = h?.kind === 'tile' ? getTiles(api)[h.meta] : null; if (ht?.app === APP.SHELL && st.view === 'focus') { enterTerm(ht); return; } } if (h?.kind === 'tile' && getTiles(api)[h.meta]?.app === APP.SCENE3D) { st.cam.manual = false; return; } activate(h, true); });
   let wheel = 0;
   canvas.addEventListener('wheel', ev => {
     ev.preventDefault(); if (st.palette) return;
+    { const h = hitAt(ev), ht = h?.kind === 'tile' && st.view === 'focus' ? getTiles(api)[h.meta] : null, tm = ht && st.terms.get(ht.id); // wheel over a terminal scrolls its history
+      if (tm) { tm.view = clampI(tm.view + (ev.deltaY < 0 ? 3 : -3), 0, tm.vt.g === tm.vt.main ? tm.vt.back.length : 0); wheel = 0; return; } }
     wheel += ev.deltaY;
     if (wheel > 120) { st.view = st.view === 'focus' ? 'overview' : st.view === 'overview' ? 'workspaces' : st.view; wheel = 0; }
     else if (wheel < -120) { st.view = st.view === 'workspaces' ? 'overview' : st.view === 'overview' ? 'focus' : st.view; wheel = 0; }
@@ -269,10 +348,12 @@ async function boot() {
     const p0 = performance.now();
     const list = buildDisplayList(api, st, env);
     hits = list.hits; lastText = list.selectionText || '';
+    syncTerms(list.termSizes || {}, now);
+    if (st.capture && (st.view !== 'focus' || selectedTile(api).id !== st.capture)) st.capture = null; // leaving the tile releases the keys
     if (st.sel && st.sel.key !== selKey()) { st.sel = null; lastText = ''; }
     renderer.draw(list, env);
     drawAcc += performance.now() - p0; drawN++; lastCmds = list.cmds.length;
-    globalThis.__kijo = { api, st, store, anim, act, sources, connect, tiles: w => getTiles(api, w), selectedText: () => lastText, renderer: renderer.name, rendererObj: renderer, frames: (globalThis.__kijo?.frames || 0) + 1 };
+    globalThis.__kijo = { api, st, store, anim, act, sources, connect, tiles: w => getTiles(api, w), selectedText: () => lastText, renderer: renderer.name, rendererObj: renderer, term: () => [...st.terms.values()].map(t => ({ tile: t.tile, id: t.id, text: t.vt.text(), cols: t.vt.cols, rows: t.vt.rows, exited: t.exited, title: t.title })), frames: (globalThis.__kijo?.frames || 0) + 1 };
     requestAnimationFrame(frame);
   }
   log(`Kijo started / ${renderer.name}${renderer.gpu !== 'none' ? ' / ' + renderer.gpu : ''}`);

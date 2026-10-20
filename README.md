@@ -1,4 +1,4 @@
-# Kijo / spatial core 0.4 — WASM first, GPU-drawn, no DOM UI, nothing to install
+# Kijo / spatial core 0.5 — WASM first, GPU-drawn, no DOM UI, nothing to install
 
 Kijo is a **spatial desktop layer**: one structured scene (workspaces, 6x6 slot grids, ghost
 reservations, status) owned by a WebAssembly core, drawn by interchangeable renderers. It is also
@@ -59,12 +59,47 @@ read from the live store; a moving packet on a cable means data really arrived o
 itself, checks Host (DNS rebinding) and caps body size, clients and series. The token travels in the URL
 fragment (never sent to a server) and is removed from the address bar on load. Reach a remote kijod
 through an SSH tunnel; do not expose it. OTLP/protobuf is refused with 415 (use `http/json`).
+Shell access (below) is a separate switch, off by default.
+
+## Text you can select, and a real terminal
+
+**Every text surface is selectable and copyable.** Drag inside a tile to select, `Ctrl+A` selects the tile's
+text, `Ctrl+C` copies, `Esc` clears. Selection lives in a semantic text model (`web/textsel.mjs`) built from the
+display list, not in pixels, so it behaves the same on WebGPU, Canvas2D and any future host.
+
+**Terminal tile.** The shell tile is a real PTY when the relay allows it:
+
+```sh
+ssh -L 7501:127.0.0.1:7501 you@host 'node --input-type=module - --allow-shell' < dist/kijod.mjs   # or KIJOD_SHELL=1
+# open the printed URL, select the shell tile, press Enter (or click it, or palette: "Terminal: open shell")
+```
+
+`src/vt.mjs` is a VT100/xterm-class emulator (SGR 16/256/truecolor, cursor and edit ops, scroll regions, alt screen,
+scrollback, bracketed paste, DSR/DA replies). The PTY itself is a ~30-line `python3` helper spawned by kijod, so there is
+nothing to compile on the host. While a terminal is captured, keys go to the shell (`Ctrl+C` is SIGINT); `Ctrl+]`
+gives them back, `Ctrl+Shift+C` / `Ctrl+Shift+V` copy and paste, the wheel or `Shift+PgUp/PgDn` scrolls history.
+The PTY follows the tile's size. Shells survive a page reload (kijod replays recent output) and are reaped 10 s after the
+last browser detaches.
+
+**Status from inside the shell** uses OSC 7501, so any script or agent can colour its own tile:
+
+```sh
+printf '\033]7501;state=blocked;kind=permission\007'     # idle | working | blocked | error | done, optional ;progress=0-100
+```
+
+**Shell access is shell access.** It is off unless kijod starts with `--allow-shell` (or `KIJOD_SHELL=1`); otherwise
+`/pty/*` answers 403 and the tile says so. Anyone holding the token can then run commands as that user, so keep the
+loopback bind and the tunnel. At most 4 shells, 64 KB per input request. Limits: the glyph atlas is ASCII (box drawing
+folds to `+ - |`, other characters show as `?`), no mouse reporting yet, no wide (CJK) cells.
+
+The surface contract (what a tile, a surface and a scene node are, focus/capture, selection, status) is written down
+in [`docs/surface-contract.md`](docs/surface-contract.md).
 
 ## Run
 
 ```sh
-npm test                           # core fuzz + telemetry + drawing + relay, no dependencies
-npm run e2e                        # real Chrome (KIJO_CHROME=...; needs playwright)
+npm test                           # core fuzz + telemetry + drawing + VT + text selection + relay, no dependencies
+npm run e2e                        # real Chrome (KIJO_CHROME=...; needs playwright): UI, and a real PTY through kijod
 node src/host.mjs                  # terminal host (works over SSH, no X11/Wayland)
 node src/serve.mjs                 # Chrome host at http://127.0.0.1:7501/
 node src/bundle.mjs                # dist/kijo.html (the app) and dist/kijod.mjs (the relay, UI embedded)
@@ -134,15 +169,17 @@ Also real since 0.4: the telemetry store and every injector above, OTLP/Promethe
 the core, layout sync between devices through kijod sessions. Charts only ever show injected data;
 there is no synthetic data in the app (tests use fixtures, labelled as such).
 
-Not built yet, and labelled as such in the UI: PTY-backed terminal tiles, SSH/Herdr attach, OSC 7501
-parsing from PTY streams, OTLP/protobuf, agent execution. The agent tile is a local simulation. The terminal host's `P`/`O` still take over the
+Also real since 0.5: selectable/copyable text on every text surface, the VT emulator, PTY-backed terminal tiles
+through kijod (opt-in), OSC 7501 parsed from the PTY stream into tile status.
+
+Not built yet, and labelled as such in the UI: SSH/Herdr attach, mouse reporting, OTLP/protobuf, agent execution. The agent tile is a local simulation. The terminal host's `P`/`O` still take over the
 terminal for a real shell/SSH session.
 
 ## Roadmap
 
 1. kijod adapters: declare capabilities, consequential actions need human approval (the relay
    itself is read-only toward the host: it collects and forwards, it never executes).
-2. Terminal tiles: PTY sessions, cell grid streamed to the renderer, OSC 7501 -> `kijo_report`.
+2. Terminal tiles: more than one shell per host, mouse reporting, Unicode glyph atlas, a scrollable log surface with search.
 3. Herdr adapter via `herdr terminal session observe|control` (NDJSON) and `herdr session list --json`.
 4. Hyprland adapter via `hyprctl` socket for mirroring real workspaces.
 5. Theme tokens (radius, gap, palette, motion) exposed as JSON; native wgpu host.

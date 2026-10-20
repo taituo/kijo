@@ -41,7 +41,7 @@ function locate(lines, x, y, m) {
 function joinLine(L, m) {
   let text = '', prevEnd = null; const starts = new Map();
   for (const r of L.runs) {
-    if (prevEnd != null) { const cw = Math.max(1, m('M', r.s, r.f, r.w)), gap = Math.round((r.x - prevEnd) / cw); text += ' '.repeat(Math.max(1, Math.min(8, gap))); }
+    if (prevEnd != null) { const cw = Math.max(1, m('M', r.s, r.f, r.w)), gap = Math.round((r.x - prevEnd) / cw); text += ' '.repeat(r.term ? Math.max(0, Math.min(500, gap)) : Math.max(1, Math.min(8, gap))); }
     starts.set(r, text.length); text += r.str; prevEnd = r.x + m(r.str, r.s, r.f, r.w);
   }
   return { text, starts };

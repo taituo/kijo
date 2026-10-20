@@ -1,6 +1,6 @@
 {
   "name": "kijo-spatial-core",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -10,11 +10,11 @@
     "build": "sh build.sh",
     "start": "node src/host.mjs",
     "overview": "node src/host.mjs --view overview --once",
-    "test": "node test/test.mjs && node test/telemetry.mjs && node test/draw.mjs && node test/textsel.mjs && node test/daemon.mjs",
+    "test": "node test/test.mjs && node test/telemetry.mjs && node test/draw.mjs && node test/vt.mjs && node test/textsel.mjs && node test/daemon.mjs",
     "kijod": "node src/kijod.mjs",
     "serve": "node src/serve.mjs",
     "bundle": "node src/bundle.mjs",
     "web": "node src/serve.mjs",
-    "e2e": "node test/e2e.mjs"
+    "e2e": "node test/e2e.mjs && node test/e2e-term.mjs"
   }
 }

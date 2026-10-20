@@ -15,6 +15,7 @@
 // Security: a random bearer token is always required for everything except the static page;
 // binds 127.0.0.1 unless KIJOD_BIND says otherwise; Host/Origin are checked against DNS rebinding.
 import { createServer } from 'node:http';
+import { spawn } from 'node:child_process';
 import os from 'node:os';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
@@ -23,14 +24,57 @@ import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
 import { Store, parseText, normalizeJson, otlp } from './telemetry.mjs';
 
-const VERSION = '0.4.0';
-const BODY_LIMIT = 1_000_000, BATCH_LIMIT = 5000, MAX_CLIENTS = 16;
+const VERSION = '0.5.0';
+const BODY_LIMIT = 1_000_000, BATCH_LIMIT = 5000, MAX_CLIENTS = 16, MAX_PTYS = 4, PTY_IN_LIMIT = 65_536, PTY_REPLAY = 65_536;
 const LOOPBACK = new Set(['127.0.0.1', '::1', 'localhost']);
 const rid = n => randomBytes(n).toString('hex');
 const sha = s => createHash('sha256').update(String(s)).digest();
 const sameSecret = (a, b) => timingSafeEqual(sha(a), sha(b));
 
-export async function startDaemon({ port = 7501, host = '127.0.0.1', token = process.env.KIJOD_TOKEN || rid(16), collect = true, ui = globalThis.__KIJO_UI__ || null, stateDir = process.env.KIJOD_STATE || '', quiet = false } = {}) {
+// ---- PTY helper: python3 is the one thing every Linux/macOS host has that can allocate a pty without a native addon.
+// stdin = bytes for the shell, stdout = bytes from it, fd 3 = "cols rows\n" resize requests. Exits with the shell.
+const PTY_HELPER = `
+exec('import os, pty, sys, select, struct, fcntl, termios, signal')  # (exec keeps the single-file bundler from mistaking this for a JS import)
+cols, rows = int(sys.argv[1]), int(sys.argv[2])
+shell = os.environ.get('SHELL') or '/bin/sh'
+pid, fd = pty.fork()
+if pid == 0:
+    os.environ['TERM'] = 'xterm-256color'; os.environ['KIJO'] = '1'
+    try: os.execvp(shell, [shell, '-l'] if os.path.basename(shell) in ('bash','zsh') else [shell])
+    except Exception: os.execvp('/bin/sh', ['/bin/sh'])
+def size(c, r):
+    try: fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', r, c, 0, 0))
+    except Exception: pass
+size(cols, rows)
+signal.signal(signal.SIGTERM, lambda *a: (os.kill(pid, signal.SIGHUP), os._exit(0)))
+ctl = 3; src = [0, fd, ctl]; cbuf = b''
+while True:
+    try: r, _, _ = select.select(src, [], [])
+    except InterruptedError: continue
+    if fd in r:
+        try: d = os.read(fd, 65536)
+        except OSError: d = b''
+        if not d: break
+        os.write(1, d)
+    if 0 in r:
+        d = os.read(0, 65536)
+        if not d: src.remove(0); os.kill(pid, signal.SIGHUP)
+        else: os.write(fd, d)
+    if ctl in r:
+        d = os.read(ctl, 256)
+        if not d: src.remove(ctl)
+        else:
+            cbuf += d
+            while b'\\n' in cbuf:
+                ln, cbuf = cbuf.split(b'\\n', 1)
+                try: c, rr = ln.split(); size(int(c), int(rr))
+                except Exception: pass
+try: _, st = os.waitpid(pid, 0)
+except Exception: st = 0
+sys.exit(os.waitstatus_to_exitcode(st) & 255)
+`;
+
+export async function startDaemon({ port = 7501, host = '127.0.0.1', token = process.env.KIJOD_TOKEN || rid(16), collect = true, ui = globalThis.__KIJO_UI__ || null, stateDir = process.env.KIJOD_STATE || '', quiet = false, shell = process.env.KIJOD_SHELL === '1' } = {}) {
   const store = new Store({ cap: 1800 });
   store.onStatus = () => true; // status messages are forwarded to browsers; the daemon owns no tiles
   const clients = new Set(), sessions = new Map();
@@ -55,6 +99,23 @@ export async function startDaemon({ port = 7501, host = '127.0.0.1', token = pro
     }
   }
   const log = (level, body) => emit({ t: 'log', level, body }, 'kijod');
+
+  // ---- PTY sessions (opt-in: this is shell access, so it is off unless the operator asked for it)
+  const ptys = new Map(); let ptySeq = 0, idleTimer = null;
+  const sse = (event, obj) => { const f = `event: ${event}\ndata: ${JSON.stringify(obj)}\n\n`; for (const c of clients) c.res.write(f); };
+  function ptyOpen(cols, rows) {
+    const id = ++ptySeq, p = spawn('python3', ['-I', '-c', PTY_HELPER, String(cols), String(rows)], { stdio: ['pipe', 'pipe', 'ignore', 'pipe'] });
+    const s = { id, p, cols, rows, replay: Buffer.alloc(0), pending: [], timer: null, dead: false };
+    const flushOut = () => { s.timer = null; const d = Buffer.concat(s.pending); s.pending = []; if (d.length) sse('pty', { id, d: d.toString('base64') }); };
+    p.stdout.on('data', d => { s.replay = Buffer.concat([s.replay, d]).subarray(-PTY_REPLAY); s.pending.push(d); s.timer ??= setTimeout(flushOut, 16); });
+    p.on('error', e => { log('warn', `pty ${id} failed: ${e.message}`); });
+    p.on('close', code => { s.dead = true; clearTimeout(s.timer); flushOut(); ptys.delete(id); sse('pty', { id, exit: code ?? -1 }); log('info', `pty ${id} exited (${code})`); });
+    p.stdin.on('error', () => {}); p.stdio[3].on('error', () => {});
+    ptys.set(id, s); log('info', `pty ${id} opened (${cols}x${rows})`); return s;
+  }
+  const ptyKill = s => { try { s.p.kill('SIGTERM'); } catch {} };
+  const ptyAll = () => { for (const s of ptys.values()) ptyKill(s); };
+  const idleCheck = () => { clearTimeout(idleTimer); if (!clients.size && ptys.size) idleTimer = setTimeout(() => { if (!clients.size) { log('info', 'no browser attached: closing ptys'); ptyAll(); } }, 10_000); };
 
   // ---- request tracing: kijod's own request handling is real, measured telemetry
   class Trace {
@@ -101,10 +162,10 @@ export async function startDaemon({ port = 7501, host = '127.0.0.1', token = pro
     if (req.method === 'GET' && path === '/events') {
       if (clients.size >= MAX_CLIENTS) return send(res, 503, { error: 'too many clients' }, 'application/json', cors);
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive', 'x-accel-buffering': 'no', ...cors });
-      res.write(`event: snapshot\ndata: ${JSON.stringify({ now: Date.now(), host: hostname, version: VERSION, ...store.snapshot() })}\n\n`);
-      const c = { res }; clients.add(c);
+      res.write(`event: snapshot\ndata: ${JSON.stringify({ now: Date.now(), host: hostname, version: VERSION, shell, ptys: [...ptys.values()].map(p => ({ id: p.id, cols: p.cols, rows: p.rows, d: p.replay.toString('base64') })), ...store.snapshot() })}\n\n`);
+      const c = { res }; clients.add(c); clearTimeout(idleTimer);
       const ka = setInterval(() => res.write(': ka\n\n'), 15_000);
-      req.on('close', () => { clearInterval(ka); clients.delete(c); log('info', `client detached (${clients.size} attached)`); });
+      req.on('close', () => { clearInterval(ka); clients.delete(c); idleCheck(); log('info', `client detached (${clients.size} attached)`); });
       log('info', `client attached (${clients.size} attached)`);
       return;
     }
@@ -124,6 +185,23 @@ export async function startDaemon({ port = 7501, host = '127.0.0.1', token = pro
         for (const m of msgs) if (emit(m, m.src || src, 'http')) n++;
         tr.end(); return send(res, 200, path.startsWith('/v1/') ? {} : { accepted: n, rejected: msgs.length - n }, 'application/json', cors);
       } catch (e) { tr.end('error'); log('warn', `ingest failed: ${e.message}`); return send(res, e.code || 400, { error: e.message }, 'application/json', cors); }
+    }
+
+    const pm = path.match(/^\/pty\/(open|(\d{1,6})\/(in|resize|close))$/);
+    if (pm && req.method === 'POST') {
+      if (!shell) return send(res, 403, { error: 'shell access is disabled; start kijod with --allow-shell or KIJOD_SHELL=1' }, 'application/json', cors);
+      const body = await readBody(req).catch(() => null); if (body === null) return send(res, 413, { error: 'too large' }, 'application/json', cors);
+      const clamp = (v, lo, hi, d) => Math.max(lo, Math.min(hi, Math.round(Number(v)) || d));
+      if (pm[1] === 'open') {
+        if (ptys.size >= MAX_PTYS) return send(res, 429, { error: 'too many shells' }, 'application/json', cors);
+        let j = {}; try { j = JSON.parse(body || '{}'); } catch {}
+        const s = ptyOpen(clamp(j.cols, 10, 500, 80), clamp(j.rows, 2, 200, 24)); return send(res, 200, { id: s.id }, 'application/json', cors);
+      }
+      const s = ptys.get(Number(pm[2])); if (!s) return send(res, 404, { error: 'no such shell' }, 'application/json', cors);
+      if (pm[3] === 'in') { if (Buffer.byteLength(body) > PTY_IN_LIMIT) return send(res, 413, { error: 'too large' }, 'application/json', cors); s.p.stdin.write(body); return send(res, 200, { ok: true }, 'application/json', cors); }
+      if (pm[3] === 'close') { ptyKill(s); return send(res, 200, { ok: true }, 'application/json', cors); }
+      let j = {}; try { j = JSON.parse(body); } catch { return send(res, 400, { error: 'not JSON' }, 'application/json', cors); }
+      s.cols = clamp(j.cols, 10, 500, s.cols); s.rows = clamp(j.rows, 2, 200, s.rows); s.p.stdio[3].write(`${s.cols} ${s.rows}\n`); return send(res, 200, { ok: true }, 'application/json', cors);
     }
     const sm = path.match(/^\/api\/session\/([a-z0-9_-]{1,32})$/);
     if (sm) { // layout + notes live with the browser; this only lets a second device pick the same session up
@@ -170,7 +248,7 @@ export async function startDaemon({ port = 7501, host = '127.0.0.1', token = pro
   }
   log('info', `kijod ${VERSION} up on ${host}:${bound}${collect ? ', collecting host metrics' : ''}`);
 
-  return { server, store, token, port: bound, emit, clients, close: () => { timers.forEach(clearInterval); clearTimeout(flushTimer); for (const c of clients) c.res.destroy(); server.closeAllConnections?.(); return new Promise(ok => server.close(ok)); } };
+  return { server, store, token, port: bound, emit, clients, shell, close: () => { ptyAll(); clearTimeout(idleTimer); timers.forEach(clearInterval); clearTimeout(flushTimer); for (const c of clients) c.res.destroy(); server.closeAllConnections?.(); return new Promise(ok => server.close(ok)); } };
 }
 
 function readMem() {
@@ -184,8 +262,8 @@ function readNet() { // Linux only; elsewhere the net series simply never appear
 const isMain = globalThis.__KIJOD_BUNDLED__ || (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url));
 if (isMain) {
   const host = process.env.KIJOD_BIND || '127.0.0.1', port = Number(process.env.KIJOD_PORT || 7501);
-  const d = await startDaemon({ port, host, collect: !process.argv.includes('--no-collect') }).catch(e => { console.error('kijod: cannot start:', e.message); process.exit(1); });
+  const d = await startDaemon({ port, host, collect: !process.argv.includes('--no-collect'), shell: process.argv.includes('--allow-shell') || process.env.KIJOD_SHELL === '1' }).catch(e => { console.error('kijod: cannot start:', e.message); process.exit(1); });
   const shown = host === '0.0.0.0' || host === '::' ? 'localhost' : host;
-  console.error(`\nkijod ${VERSION}\n  open   http://${shown}:${d.port}/#token=${d.token}\n  inject curl -H "Authorization: Bearer ${d.token}" --data-binary 'my.metric 42' http://${shown}:${d.port}/ingest\n  otlp   OTEL_EXPORTER_OTLP_ENDPOINT=http://${shown}:${d.port} OTEL_EXPORTER_OTLP_PROTOCOL=http/json OTEL_EXPORTER_OTLP_HEADERS=authorization=Bearer%20${d.token}\n${host !== '127.0.0.1' && host !== '::1' ? '  NOTE   bound beyond loopback: put TLS in front (reverse proxy) before exposing this.\n' : ''}`);
+  console.error(`\nkijod ${VERSION}\n  open   http://${shown}:${d.port}/#token=${d.token}\n  inject curl -H "Authorization: Bearer ${d.token}" --data-binary 'my.metric 42' http://${shown}:${d.port}/ingest\n  otlp   OTEL_EXPORTER_OTLP_ENDPOINT=http://${shown}:${d.port} OTEL_EXPORTER_OTLP_PROTOCOL=http/json OTEL_EXPORTER_OTLP_HEADERS=authorization=Bearer%20${d.token}\n${d.shell ? '  SHELL  shell access is ENABLED: anyone holding the token can run commands as this user.\n' : ''}${host !== '127.0.0.1' && host !== '::1' ? '  NOTE   bound beyond loopback: put TLS in front (reverse proxy) before exposing this.\n' : ''}`);
   const bye = () => d.close().then(() => process.exit(0)); process.on('SIGINT', bye); process.on('SIGTERM', bye); process.on('SIGHUP', bye);
 }
