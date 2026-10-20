@@ -1,0 +1,14 @@
+[package]
+name = "kijo-native"
+version = "0.1.0"
+edition = "2021"
+description = "Spike: a native host for the Kijo WASM core and shaders/scene.wgsl (no browser)"
+publish = false
+
+[dependencies]
+wasmi = "0.51"
+wgpu = "27"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+png = "0.17"
+serde_json = "1"

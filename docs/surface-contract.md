@@ -100,6 +100,8 @@ need an explicit human action in the host, never an escape sequence.
 ## 9. What is deliberately not decided
 
 - **Native wgpu host**: same core, same display-list ops, different renderer. The ops above are the only contract it must meet.
+  A spike (`native/`) already runs the same `scene.wasm` under wasmi with byte-identical state (`test/parity.mjs`) and draws ops 0-2 of
+  `scene.wgsl` through wgpu; the display-list builder, glyph atlas and remaining ops are what a full host still needs.
 - **Render-to-texture** (glass over *tiles*, not just the wallpaper): a renderer feature behind the existing `glass` op.
 - **Embedding a full engine** (three.js, Bevy): another op or a surface with its own pass, scissored to its rectangle, as `scene3d` already is.
 - **Multiple surfaces per tile** (split terminal, tabs): a layout question for the core, not a rendering one.

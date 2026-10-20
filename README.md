@@ -149,6 +149,24 @@ surface` in the palette adds more. A full engine (three.js, Babylon, a native Be
 plug in as another surface type behind the same display-list op; none is needed for height fields and
 a dependency would own the device and the pass structure.
 
+## Native host (spike)
+
+`native/` is a Rust host for the same core: `wasmi` runs the very same `core/scene.wasm`, and `wgpu` draws through the very same
+`shaders/scene.wgsl` the browser compiles, headless into a PNG. No browser involved.
+
+```sh
+cd native && cargo build --release
+./target/release/kijo-native render out.png 1 1280 800 scenario.json   # view 0..4, optional scenario of core calls
+node test/parity.mjs                                                   # JS host and native host must end in identical state
+```
+
+`test/parity.mjs` replays 400+ scripted and seeded-random core calls on both hosts and requires identical return values,
+selection, every workspace's tiles, all five views' scene nodes and the event ring. That is the evidence behind "state lives
+in the core, hosts only render": a native host needed no core changes. The renderer is deliberately small (rectangles,
+strokes, dashes, i.e. shader modes 0-2; screenshot in [`docs/native-spike-overview.png`](docs/native-spike-overview.png), rendered on
+llvmpipe software Vulkan). Text needs the glyph atlas, and glass, wallpaper and 3D need their ops ported; the display-list
+builder is still JS, so a full native host needs it ported (or run as WASM) next. `npm run parity` needs a Rust toolchain.
+
 ## Glass theme and wallpaper
 
 `?theme=glass` or palette `Theme: glass`: translucent panels over a procedural wallpaper, drawn by two
@@ -209,7 +227,7 @@ The agent tile is a local simulation. The terminal host's `P`/`O` still take ove
 2. Terminal tiles: more than one shell per host, mouse reporting, Unicode glyph atlas, VT parsing in a worker, a scrollable log surface with search.
 3. Herdr adapter via `herdr terminal session observe|control` (NDJSON) and `herdr session list --json`.
 4. Hyprland adapter via `hyprctl` socket for mirroring real workspaces.
-5. Theme tokens (radius, gap, palette, motion) exposed as JSON; native wgpu host (same core, same display-list ops); render-to-texture glass over tiles; an accessibility mirror of the text model.
+5. Theme tokens (radius, gap, palette, motion) exposed as JSON; a full native host (spike exists: port the display-list builder, glyph atlas and the remaining ops); render-to-texture glass over tiles; an accessibility mirror of the text model.
 
 ## Design constraints
 
