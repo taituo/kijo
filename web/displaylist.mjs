@@ -6,6 +6,8 @@
 // zone, workspace pills with attention marks, proportional type for titles, mono for data,
 // tokens for radius/gap so theming later changes values, not code.
 import { NODE, FLAG, STATUS, BLOCKED_KIND, APP, SCALE, EVENT, getScene, getTiles, getEvents, label, tag, selectedTile } from '../src/core.mjs';
+import { drawChart, drawSpark, drawLogs, drawTraces, drawSys, drawFlow, fmtVal, windowLabel, shortName } from './telemetry-draw.mjs';
+import { baseName } from '../src/telemetry.mjs';
 
 const rgb = h => [parseInt(h.slice(1, 3), 16) / 255, parseInt(h.slice(3, 5), 16) / 255, parseInt(h.slice(5, 7), 16) / 255, 1];
 const base = { radius: 6, gap: 10, bar: 38, hint: 28 };
@@ -89,7 +91,10 @@ export function buildDisplayList(api, st, env) {
 
   const tilesNow = getTiles(api);
   const wsNodes = getScene(api, 'workspaces');
-  const scene = getScene(api, st.view);
+  const scene = st.view === 'flow' ? [] : getScene(api, st.view);
+  const store = env.store, now = env.now ?? Date.now(), winMs = st.window || 300000, bindings = st.bindings || {};
+  // A binding may name a base series ('cpu.core_pct'); resolve it to concrete keys that exist.
+  const keysFor = id => [].concat(bindings[id] ?? []).flatMap(b => !store ? [] : store.series.has(b) ? [b] : [...store.series.keys()].filter(k => baseName(k) === b).slice(0, 1));
   const cur = api.kijo_special_open() ? -1 : api.kijo_ws();
   const wsIndex = api.kijo_special_open() ? 9 : api.kijo_ws();
   const sel = selectedTile(api);
@@ -150,6 +155,8 @@ export function buildDisplayList(api, st, env) {
     if (M.cpu != null) mod('cpu', `${M.cpu}%`);
     else if (M.cores) mod('cores', String(M.cores));
     if (M.net) mod('net', M.net, M.net === 'offline' ? T.red : T.ink);
+    if (store) { const live = [...store.sources.values()].filter(s => now - s.last < 15000).length; mod('inj', String(live), live ? T.ink : T.dim); }
+    if (env.daemon) mod('kijod', env.daemon.state, env.daemon.state === 'connected' ? T.ink : T.yellow);
     g.fill(rx + 8, 9, 1, B - 18, T.faint); rx -= 8;
   }
   // Attention: the module that answers "what needs me?".
@@ -164,7 +171,7 @@ export function buildDisplayList(api, st, env) {
   if (!compact) {
     const space = rx - bx - 20;
     let title, sub = '', subColor = T.dim;
-    if (sel.kind === 1) { title = label(sel, st.notes); sub = STATUS[sel.status] + (sel.status === 2 && sel.blockedKind ? ': ' + BLOCKED_KIND[sel.blockedKind] : '') + (sel.progress ? ` ${sel.progress}%` : ''); subColor = statusColor(T, sel.status); }
+    if (sel.kind === 1) { title = label(sel, st.notes, bindings); sub = STATUS[sel.status] + (sel.status === 2 && sel.blockedKind ? ': ' + BLOCKED_KIND[sel.blockedKind] : '') + (sel.progress ? ` ${sel.progress}%` : ''); subColor = statusColor(T, sel.status); }
     else if (sel.kind === 2) { title = `ghost - reserved by #${sel.owner}`; }
     else title = 'empty slot';
     const tw = measure(title, 13, 'sans', 600), sw = sub ? measure(sub, 12) + 12 : 0;
@@ -211,9 +218,9 @@ export function buildDisplayList(api, st, env) {
         const ch = tag(t)[0] || '?';
         c.text(x + ip + (bs - measure(ch, 12, 'mono', 700)) / 2, y + ip + 3, ch, 12, sc === T.dim ? T.ink : T.onAccent, { f: 'mono', w: 700 });
         const editing = st.editing && st.editing.id === t.id;
-        const title = isNote ? (editing ? 'editing note' : 'NOTE ' + t.id) : label(t, st.notes);
+        const title = isNote ? (editing ? 'editing note' : 'NOTE ' + t.id) : label(t, st.notes, bindings);
         c.text(x + ip + bs + 10, y + ip + 1, title, 15, editing ? T.blue : fg, { f: 'sans', w: 600, max: w - ip * 2 - bs - 110 });
-        const state = STATUS[t.status] + (t.status === 2 && t.blockedKind ? ': ' + BLOCKED_KIND[t.blockedKind] : '');
+        const state = t.app >= APP.SYS ? (t.app === APP.SERIES ? windowLabel(winMs) : 'live') : STATUS[t.status] + (t.status === 2 && t.blockedKind ? ': ' + BLOCKED_KIND[t.blockedKind] : '');
         const sw = measure(state, 12) + 14;
         c.fill(x + w - ip - sw + 0, y + ip + 6, 6, 6, sc);
         c.text(x + w - ip - sw + 12 - 0, y + ip + 3, state, 12, sc === T.dim ? T.dim : sc, { max: sw });
@@ -239,17 +246,33 @@ export function buildDisplayList(api, st, env) {
         } else if (t.app === APP.METRICS) {
           const rows = [['cores', M2.cores], ['memory', M2.memory], ['frame rate', M2.fps != null ? M2.fps + ' fps' : null], ['renderer', M2.gpu], ['cpu load', M2.cpu != null ? M2.cpu + '%' : 'needs kijod'], ['ram used', M2.ram != null ? M2.ram + '%' : 'needs kijod']];
           rows.forEach(([k, v], i) => { c.text(x + ip, by + i * 20, k, 12, T.dim); c.text(x + ip + 100, by + i * 20, String(v ?? '-'), 12, fg, { w: 600, max: bw - 100 }); });
+        } else if (t.app >= APP.SYS) {
+          const cr = { x: x + ip, y: y + ip + bs + 12, w: bw, h: Math.max(20, h - (ip * 2 + bs + 12)) };
+          if (!store) c.text(cr.x, cr.y, 'no telemetry store in this host', 12, sub);
+          else if (t.app === APP.SERIES) {
+            const ks = keysFor(t.id);
+            if (!ks.length) { c.text(cr.x, cr.y, 'unbound chart', 13, fg, { f: 'sans', w: 500 }); c.text(cr.x, cr.y + 22, 'press / and choose "Pin chart: <series>"', 12, sub, { max: bw }); c.text(cr.x, cr.y + 42, 'or inject:  queue.depth 12', 12, sub, { max: bw }); }
+            else drawChart(c, measure, T, cr, store, ks, winMs, now, { mini: false });
+          } else if (t.app === APP.LOGS) drawLogs(c, measure, T, cr, store, now);
+          else if (t.app === APP.TRACES) drawTraces(c, measure, T, cr, store, now);
+          else drawSys(c, measure, T, cr, store, now, { windowMs: winMs });
         } else if (t.app === APP.REMOTE) {
           c.text(x + ip, by, 'no remote configured', 13, fg, { f: 'sans', w: 500 });
           c.text(x + ip, by + 22, 'SSH and Herdr attach through kijod', 12, sub, { max: bw });
         } else c.text(x + ip, by, tag(t), 12, sub);
-        if (h > 230) c.text(x + ip, y + h - ip - (t.progress > 0 || t.status === 1 ? 26 : 14), `#${t.id}  group ${t.group}  tx ${t.tx}`, 11, T.dim, { max: bw });
+        if (h > 230 && t.app < APP.SYS) c.text(x + ip, y + h - ip - (t.progress > 0 || t.status === 1 ? 26 : 14), `#${t.id}  group ${t.group}  tx ${t.tx}`, 11, T.dim, { max: bw });
       } else {
         // heatmap cell: glanceable, status-first
         const small = h < 44 || w < 56;
         if (!small) {
           c.text(x + ip, y + 6, `${tag(t)} ${t.id}`, 11, fg, { w: 600, max: w - ip * 2 });
-          if (h > 48) c.text(x + ip, y + 22, STATUS[t.status], 11, sub, { max: w - ip * 2 });
+          if (t.app >= APP.SYS && store) {
+            const cr = { x: x + ip, y: y + 22, w: w - ip * 2, h: h - 28 };
+            if (t.app === APP.SERIES) { const k = keysFor(t.id)[0]; if (k && cr.h > 10) { if (cr.h > 26) c.text(x + ip + measure(`${tag(t)} ${t.id}  `, 11, 'mono', 600), y + 6, shortName(k), 10, sub, { max: w - ip * 2 - 40 }); drawSpark(c, measure, T, cr, store, k, winMs, now); } else if (!k) c.text(cr.x, cr.y, 'unbound', 10, sub); }
+            else if (t.app === APP.LOGS && cr.h > 12) drawLogs(c, measure, T, cr, store, now, { mini: true });
+            else if (t.app === APP.TRACES && cr.h > 12) drawTraces(c, measure, T, cr, store, now, { mini: true });
+            else if (t.app === APP.SYS && cr.h > 12) drawSys(c, measure, T, cr, store, now, { mini: true });
+          } else if (h > 48) c.text(x + ip, y + 22, STATUS[t.status], 11, sub, { max: w - ip * 2 });
           if (isNote && h > 66) c.wrap(x + ip, y + 38, st.notes[t.id] ?? '', h > 150 ? 13 : 11, fg, w - ip * 2, Math.max(1, Math.floor((h - 52) / (h > 150 ? 17 : 14))), h > 150 ? 17 : 14, { f: 'sans' });
         }
         if (t.progress > 0) { a.fill(x + 6, y + h - 8, w - 12, 3, T.faint, 2); a.fill(x + 6, y + h - 8, (w - 12) * t.progress / 100, 3, T.blue, 2); }
@@ -345,7 +368,7 @@ export function buildDisplayList(api, st, env) {
       const y = top + i * (rowH + 4), t = tilesNow[n.meta];
       g.fill(area.x, y, area.w, rowH, T.panel, T.radius); g.fill(area.x, y, 4, rowH, statusColor(T, n.status));
       hits.push({ kind: 'tile', meta: n.meta, x: area.x, y, w: area.w, h: rowH });
-      g.text(area.x + 16, y + 8, `#${n.id}`.padEnd(6) + STATUS[n.status].padEnd(9) + `group ${n.group}`.padEnd(11) + label(t, st.notes), 12, T.ink, { max: area.w - 28 });
+      g.text(area.x + 16, y + 8, `#${n.id}`.padEnd(6) + STATUS[n.status].padEnd(9) + `group ${n.group}`.padEnd(11) + label(t, st.notes, bindings), 12, T.ink, { max: area.w - 28 });
       if (n.flags & FLAG.SELECTED) g.stroke(area.x - 2, y - 2, area.w + 4, rowH + 4, T.ink, 2, T.radius);
     });
     let ey = top + scene.length * (rowH + 4) + 18;
@@ -356,6 +379,15 @@ export function buildDisplayList(api, st, env) {
     if (!all.length) g.text(area.x, ey, 'no events yet', 12, T.dim);
     all.forEach((e, i) => g.text(area.x, ey + i * 18, e, 12, T.dim, { max: area.w }));
     info = `${scene.length} live tiles   ${core.length} core events`;
+  } else if (st.view === 'flow') {
+    // Where the data comes from and where it is shown. Every row is read from the store and the
+    // core's tile tables; a moving packet means a message really arrived on that cable recently.
+    if (!store) g.text(area.x, area.y, 'no telemetry store in this host', 12, T.dim);
+    else {
+      const all = []; for (let w = 0; w < 10; w++) for (const t of getTiles(api, w)) all.push({ ...t, ws: w });
+      const model = drawFlow(g, g, measure, T, area, store, all, bindings, now, env.time, hits, new Set(Object.values(bindings).flat().map(baseName)));
+      info = `${model.sources.length} injectors   ${model.groups.length} series   ${store.logs.length} logs   ${store.spans.length} spans   window ${windowLabel(winMs)}`;
+    }
   }
   anim.end();
 
@@ -363,13 +395,15 @@ export function buildDisplayList(api, st, env) {
   const ctxHint = (() => {
     if (st.editing) return 'writing   esc save   enter newline   backspace delete';
     if (st.view === 'workspaces') return 'click or , . to switch   enter opens   S scratchpad   M move tile on';
-    if (st.view === 'back' || st.view === 'timeline') return 'arrows move   1-5 views   / search';
+    if (st.view === 'back' || st.view === 'timeline') return 'arrows move   1-6 views   / search';
+    if (st.view === 'flow') return 'click a series to pin a chart   click a tile to go there   paste data to inject';
     if (sel.kind === 2) return 'N promote to note   F 2x2 reservation   X close owner';
     if (sel.kind === 0) return 'N note   F 2x2 reservation';
     if (sel.app === APP.NOTE) return 'E write   X close   shift+arrows swap   M to next ws';
+    if (sel.app >= APP.SYS) return 'X close   / pin series   shift+arrows swap   paste data to inject';
     return 'T state   X close   shift+arrows swap   M to next ws';
   })();
-  const keys = '   |   1-5 views   , . workspace   / search   G ghosts   R reset';
+  const keys = '   |   1-6 views   , . workspace   [ ] window   / search   R reset';
   g.fill(0, hintY, W, 1, T.faint);
   const room = compact ? W - pad * 2 : W - pad * 2 - measure(info, 11) - 28;
   const full = ctxHint + keys;

@@ -40,5 +40,37 @@ assert.equal(await q(() => __kijo.st.notes[100]), undefined, 'fresh param ignore
 await page.goto('' + BUNDLE + '?renderer=2d'); await page.waitForFunction(() => globalThis.__kijo?.frames > 5);
 assert.equal(await q(() => __kijo.st.notes[100]), 'Hello board\nline two', 'notes persisted in localStorage');
 assert.equal(await q(() => [...document.querySelectorAll('body > *')].filter(e => e.tagName !== 'SCRIPT').map(e => e.tagName).join()), 'CANVAS', 'DOM contains only the canvas');
+
+// ---- telemetry: the browser alone is a complete runtime (no relay, nothing installed)
+await page.goto(BUNDLE + '?renderer=2d&fresh'); await page.waitForFunction(() => globalThis.__kijo?.frames > 5);
+await q(() => { const now = Date.now(); for (let i = 60; i >= 0; i--) kijo.inject(`queue.depth ${10 + (i % 9)}`, 'e2e'); kijo.inject('{"t":"metric","name":"jobs","value":4}', 'e2e'); kijo.inject('{"t":"log","level":"error","body":"boom from e2e"}', 'e2e'); });
+assert.equal(await q(() => __kijo.store.series.has('queue.depth') && __kijo.store.logs.some(l => l.body === 'boom from e2e')), true, 'window.kijo.inject feeds the store');
+assert.equal(await q(() => { const dt = new DataTransfer(); dt.setData('text/plain', 'pasted.metric 7'); const ev = new ClipboardEvent('paste', { clipboardData: dt, cancelable: true }); dispatchEvent(ev); return ev.defaultPrevented && __kijo.store.series.has('pasted.metric'); }), true, 'paste injects');
+assert.equal(await q(() => { const dt = new DataTransfer(); dt.setData('text/plain', 'just some words'); const ev = new ClipboardEvent('paste', { clipboardData: dt, cancelable: true }); dispatchEvent(ev); return ev.defaultPrevented; }), false, 'ordinary pastes are left alone');
+// status injection drives the real core
+await q(() => kijo.inject('{"t":"status","id":1,"state":"blocked","kind":"permission"}', 'agent-x'));
+assert.equal(await q(() => __kijo.tiles(0).find(t => t.id === 1).status), 2, 'status injected through the store reaches the WASM tile (blocked)');
+await page.keyboard.press('/'); await page.keyboard.type('pin chart: queue'); await page.keyboard.press('Enter');
+assert.equal(await q(() => Object.values(__kijo.st.bindings).includes('queue.depth')), true, 'palette pins an injected series as a chart tile');
+await page.keyboard.press('6'); assert.equal((await sel())[3], 'flow');
+assert.equal(await q(() => __kijo.store.sources.has('e2e') && __kijo.store.sources.has('browser')), true, 'sources are tracked per injector');
+await page.keyboard.press('Escape'); assert.equal((await sel())[3], 'focus');
+// persistence of bindings
+await page.goto(BUNDLE + '?renderer=2d'); await page.waitForFunction(() => globalThis.__kijo?.frames > 5);
+assert.equal(await q(() => Object.values(__kijo.st.bindings).includes('queue.depth')), true, 'bindings survive reload');
+
+// ---- optional relay: same page, remote injector, token only in the fragment
+const { startDaemon } = await import('../src/kijod.mjs');
+const d = await startDaemon({ port: 0, token: 'e2e-token', collect: true, ui: bundle(), quiet: true });
+const page2 = await browser.newPage({ viewport: { width: 1280, height: 800 } }); page2.on('pageerror', e => errs.push(String(e)));
+await page2.goto(`http://127.0.0.1:${d.port}/?renderer=2d&fresh#token=e2e-token`);
+await page2.waitForFunction(() => globalThis.__kijo?.store?.series.has('cpu.util_pct'), null, { timeout: 15000 });
+assert.equal(await page2.evaluate(() => location.hash), '', 'token removed from the address bar');
+await fetch(`http://127.0.0.1:${d.port}/ingest`, { method: 'POST', headers: { authorization: 'Bearer e2e-token', 'x-kijo-source': 'vps-agent' }, body: '{"t":"status","id":1,"state":"error"}\nremote.queue 99' });
+await page2.waitForFunction(() => __kijo.store.series.has('remote.queue') && __kijo.store.sources.has('vps-agent'), null, { timeout: 8000 });
+assert.equal(await page2.evaluate(() => __kijo.tiles(0).find(t => t.id === 1).status), 3, 'status injected on the VPS reaches the tile in this browser (error)');
+await page2.keyboard.press('ArrowLeft'); await page2.waitForTimeout(1200);
+assert.ok((await (await fetch(`http://127.0.0.1:${d.port}/api/session/default`, { headers: { authorization: 'Bearer e2e-token' } })).json()).version === 2, 'layout syncs to the relay');
+await d.close();
 console.log('E2E OK; console errors:', errs.filter(e => !/404/.test(e)));
 await browser.close();

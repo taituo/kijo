@@ -18,7 +18,8 @@ enum { EMPTY = 0, REAL = 1, GHOST = 2 };
 // Same vocabulary as OSC 7501: idle, working, blocked, error, done(=COMPLETE).
 enum { IDLE = 0, WORKING = 1, BLOCKED = 2, ERROR = 3, COMPLETE = 4 };
 enum { BK_NONE = 0, BK_PERMISSION = 1, BK_QUESTION = 2, BK_AUTH = 3 };
-enum { APP_NONE = 0, APP_SHELL = 1, APP_AGENT = 2, APP_METRICS = 3, APP_REMOTE = 4, APP_NOTE = 5, APP_HERDR = 6 };
+enum { APP_NONE = 0, APP_SHELL = 1, APP_AGENT = 2, APP_METRICS = 3, APP_REMOTE = 4, APP_NOTE = 5, APP_HERDR = 6,
+       APP_SYS = 7, APP_SERIES = 8, APP_LOGS = 9, APP_TRACES = 10, APP_MAX = 10 };
 enum { VIEW_FOCUS = 0, VIEW_OVERVIEW = 1, VIEW_BACK = 2, VIEW_TIMELINE = 3, VIEW_WORKSPACES = 4 };
 enum { NODE_SLOT = 1, NODE_TILE = 2, NODE_GHOST = 3, NODE_LINK = 4, NODE_EVENT = 5, NODE_WORKSPACE = 6 };
 enum { FLAG_SELECTED = 1, FLAG_IN_VIEWPORT = 2, FLAG_ACTIVE_WS = 4 };
@@ -107,6 +108,20 @@ void kijo_reset(void) {
     put(1,2,1, 6,REAL,IDLE,0,6,++transaction_id,APP_NOTE);
     put(1,3,2, 7,REAL,IDLE,0,7,++transaction_id,APP_NOTE);
     sel_x[1] = 1; sel_y[1] = 1; view_x[1] = 0; view_y[1] = 0;
+    // Workspace 3: browser telemetry. Works with no daemon (the page injects its own numbers).
+    put(2,1,1, 8,REAL,IDLE,0, 8,++transaction_id,APP_SERIES);
+    put(2,2,1, 9,REAL,IDLE,0, 9,++transaction_id,APP_SERIES);
+    put(2,1,2,10,REAL,IDLE,0,10,++transaction_id,APP_SERIES);
+    put(2,2,2,11,REAL,IDLE,0,11,++transaction_id,APP_SERIES);
+    sel_x[2] = 1; sel_y[2] = 1; view_x[2] = 1; view_y[2] = 1;
+    // Workspace 4: host telemetry. Fills when kijod (or any injector) feeds the runtime.
+    put(3,1,1,12,REAL,IDLE,0,12,++transaction_id,APP_SYS);
+    put(3,2,1,13,REAL,IDLE,0,13,++transaction_id,APP_SERIES);
+    put(3,1,2,14,REAL,IDLE,0,14,++transaction_id,APP_SERIES);
+    put(3,2,2,15,REAL,IDLE,0,15,++transaction_id,APP_SERIES);
+    put(3,3,1,16,REAL,IDLE,0,16,++transaction_id,APP_LOGS);
+    put(3,3,2,17,REAL,IDLE,0,17,++transaction_id,APP_TRACES);
+    sel_x[3] = 1; sel_y[3] = 1; view_x[3] = 1; view_y[3] = 1;
     log_event(EV_RESET, 0, 0, 0);
 }
 
@@ -151,7 +166,7 @@ __attribute__((export_name("kijo_spawn")))
 int32_t kijo_spawn(int32_t app, int32_t fw, int32_t fh, int32_t corner) {
     int32_t w = active();
     fw = bounded(fw, 1, SIDE); fh = bounded(fh, 1, SIDE);
-    if (app < 1 || app > 6) return 0;
+    if (app < 1 || app > APP_MAX) return 0;
     int32_t ox = (corner & 1) ? sel_x[w] - (fw - 1) : sel_x[w];
     int32_t oy = (corner & 2) ? sel_y[w] - (fh - 1) : sel_y[w];
     if (ox < 0 || oy < 0 || ox + fw > SIDE || oy + fh > SIDE) return 0;

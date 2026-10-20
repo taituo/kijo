@@ -7,7 +7,7 @@ export const NODE = { SLOT: 1, TILE: 2, GHOST: 3, LINK: 4, EVENT: 5, WORKSPACE: 
 // Same vocabulary as OSC 7501 (done = COMPLETE).
 export const STATUS = ['idle', 'working', 'blocked', 'error', 'done'];
 export const BLOCKED_KIND = ['', 'permission', 'question', 'auth'];
-export const APP = { NONE: 0, SHELL: 1, AGENT: 2, METRICS: 3, REMOTE: 4, NOTE: 5, HERDR: 6 };
+export const APP = { NONE: 0, SHELL: 1, AGENT: 2, METRICS: 3, REMOTE: 4, NOTE: 5, HERDR: 6, SYS: 7, SERIES: 8, LOGS: 9, TRACES: 10 };
 export const VIEWS = ['focus', 'overview', 'back', 'timeline', 'workspaces'];
 export const FLAG = { SELECTED: 1, IN_VIEWPORT: 2, ACTIVE_WS: 4 };
 export const OP = { MOVEFOCUS: 1, WORKSPACE: 2, MOVETOWORKSPACE: 3, KILLACTIVE: 4, TOGGLESPECIAL: 5, SWAP: 6, JUMPFOCUS: 7, CYCLEWORKSPACE: 8 };
@@ -60,7 +60,7 @@ export const dispatch = (api, op, a = 0, b = 0) => api.kijo_dispatch(OP[String(o
 
 // Persisted schema v2 is identical for terminal, browser and daemon hosts.
 // Notes (free text) live outside the core, keyed by tile id.
-export function serializeState(api, notes = {}) {
+export function serializeState(api, notes = {}, extra = {}) {
   const ws = Array.from({ length: 10 }, (_, w) => ({ tiles: getTiles(api, w) }));
   const saved = { active: api.kijo_ws(), special: api.kijo_special_open() };
   const views = ws.map((_, w) => w); // selection is read per active ws, see below
@@ -72,7 +72,7 @@ export function serializeState(api, notes = {}) {
   }
   api.kijo_restore_active(wasW, wasS);
   ws.forEach((w, i) => (w.sel = sel[i]));
-  return { version: 2, ...saved, workspaces: ws, notes };
+  return { version: 2, ...saved, workspaces: ws, notes, ...extra };
 }
 export function applyState(api, state) {
   if (!state || state.version !== 2 || !Array.isArray(state.workspaces) || state.workspaces.length !== 10) throw new Error('Wrong schema');
@@ -87,18 +87,36 @@ export function applyState(api, state) {
 }
 
 // Demo text for the fixed bulletin-board tiles created by kijo_reset.
+// Which series a chart tile shows (string or up to 3 names). Tiles without an entry are unbound.
+export const DEFAULT_BINDINGS = {
+  8: 'browser.fps', 9: 'browser.draw_ms', 10: 'browser.loop_lag_ms', 11: 'browser.cmds',
+  13: 'cpu.util_pct', 14: 'mem.used_pct', 15: ['net.rx_kbps', 'net.tx_kbps'],
+};
+// Put a new tile on the empty slot nearest the selection (same workspace) and select it.
+export function placeTile(api, app) {
+  const ts = getTiles(api), sx = api.kijo_sel_x(), sy = api.kijo_sel_y();
+  let best = -1, bd = 99;
+  ts.forEach((t, i) => { if (t.kind !== KIND.EMPTY) return; const d = Math.abs(i % SIDE - sx) + Math.abs(Math.floor(i / SIDE) - sy); if (d < bd) { bd = d; best = i; } });
+  if (best < 0) return 0;
+  api.kijo_select(best % SIDE, Math.floor(best / SIDE));
+  return api.kijo_spawn(app, 1, 1, 0);
+}
 export const DEFAULT_NOTES = { 5: 'Problem: tiling managers stretch neighbours', 6: 'Idea: ghosts reserve space, owners clean up', 7: 'Pin anything. No agent needed.' };
 
 // Semantic naming of tiles by app type. Hosts may override per adapter.
-export function label(t, notes = {}) {
+export function label(t, notes = {}, bindings = {}) {
   if (t.app === APP.SHELL) return 'LOCAL SHELL';
   if (t.app === APP.AGENT) return 'AGENT / demo';
   if (t.app === APP.METRICS) return 'HOST METRICS';
   if (t.app === APP.REMOTE) return 'REMOTE / unset';
   if (t.app === APP.HERDR) return 'HERDR SESSION';
+  if (t.app === APP.SYS) return 'SYSTEM';
+  if (t.app === APP.SERIES) { const b = bindings[t.id]; return b ? [].concat(b)[0].replace(/\{.*$/, '') : 'CHART / unbound'; }
+  if (t.app === APP.LOGS) return 'LOGS';
+  if (t.app === APP.TRACES) return 'TRACES';
   return String(notes[t.id] ?? `NOTE ${t.id}`).slice(0, 40);
 }
-export const tag = t => ['', 'SHELL', 'AGENT', 'HOST', 'SSH', 'NOTE', 'HERDR'][t.app] || '';
+export const tag = t => ['', 'SHELL', 'AGENT', 'HOST', 'SSH', 'NOTE', 'HERDR', 'SYS', 'CHART', 'LOGS', 'TRACE'][t.app] || '';
 
 // ---------------------------------------------------------------------------
 // Host-independent key handling. Every host maps its raw input to these names:
@@ -106,11 +124,13 @@ export const tag = t => ['', 'SHELL', 'AGENT', 'HOST', 'SSH', 'NOTE', 'HERDR'][t
 // Shell takeover (p/o) is host specific and stays in the host.
 // ui = { view, ghosts, notes, events }.  Returns true when the key was consumed.
 export function handleKeyName(api, ui, key) {
+  ui.bindings ??= {};
   const t = selectedTile(api);
   const log = e => ui.events.push(e);
   const arrows = { ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down' };
   const swaps = { 'Shift+ArrowLeft': 'left', 'Shift+ArrowRight': 'right', 'Shift+ArrowUp': 'up', 'Shift+ArrowDown': 'down' };
   if (['1', '2', '3', '4', '5'].includes(key)) ui.view = VIEWS[Number(key) - 1];
+  else if (key === '6' && ui.flow !== false) ui.view = 'flow'; // host-only view (no WASM scene): injectors -> series -> tiles
   else if (arrows[key]) {
     if (ui.view === 'workspaces') { if (key === 'ArrowRight') dispatch(api, 'CYCLEWORKSPACE', 1); else if (key === 'ArrowLeft') dispatch(api, 'CYCLEWORKSPACE', -1); else if (key === 'ArrowDown') dispatch(api, 'CYCLEWORKSPACE', 1); else dispatch(api, 'CYCLEWORKSPACE', -1); }
     else dispatch(api, 'MOVEFOCUS', DIR[arrows[key]]);
@@ -121,7 +141,7 @@ export function handleKeyName(api, ui, key) {
   else if (key === 's') dispatch(api, 'TOGGLESPECIAL');
   else if (key === 'm') { const to = (api.kijo_ws() + 1) % 9; if (dispatch(api, 'MOVETOWORKSPACE', to)) log(`Moved tile #${t.id} to workspace ${to + 1}`); }
   else if (key === 'g') ui.ghosts = !ui.ghosts;
-  else if (key === 'r') { api.kijo_reset(); ui.notes = { ...DEFAULT_NOTES }; log('Reset'); }
+  else if (key === 'r') { api.kijo_reset(); ui.notes = { ...DEFAULT_NOTES }; ui.bindings = { ...DEFAULT_BINDINGS }; log('Reset'); }
   else if (key === 'n') {
     const id = t.kind === KIND.GHOST ? api.kijo_promote_ghost(api.kijo_sel_x(), api.kijo_sel_y()) : t.kind === KIND.EMPTY ? api.kijo_spawn(APP.NOTE, 1, 1, 0) : 0;
     if (id) { ui.notes[id] = `Note ${id}`; log(`New note #${id} at ${api.kijo_sel_x()},${api.kijo_sel_y()}`); }
@@ -130,7 +150,7 @@ export function handleKeyName(api, ui, key) {
       const id = api.kijo_spawn(APP.NOTE, 2, 2, corner);
       if (id) { ui.notes[id] = `Note ${id}`; log(`New 2x2 footprint note #${id}`); break; }
     }
-  } else if (key === 'x') { if (t.kind === KIND.REAL && dispatch(api, 'KILLACTIVE')) { log(`Closed tile #${t.id}; owned ghosts cleaned`); delete ui.notes[t.id]; } }
+  } else if (key === 'x') { if (t.kind === KIND.REAL && dispatch(api, 'KILLACTIVE')) { log(`Closed tile #${t.id}; owned ghosts cleaned`); delete ui.notes[t.id]; delete ui.bindings[t.id]; } }
   else if (key === 't') { if (t.kind === KIND.REAL) { api.kijo_report(t.id, (t.status + 1) % 5, 1, 40); log(`Demo status change for tile #${t.id}`); } }
   else return false;
   return true;

@@ -71,6 +71,7 @@ export function render(api, { view = 'focus', cols = 106, rows = 35, ghosts = tr
     else if (t.app === APP.AGENT) { surf.put(x, y, 'SIMULATED agent / not running'); surf.put(x, y + 1, '[T] change test state'); }
     else if (t.app === APP.METRICS) { surf.put(x, y, `Host CPU load: ${loadavg()[0].toFixed(2)}`); surf.put(x, y + 1, `System memory: ${Math.round((1 - freemem() / totalmem()) * 100)}%`); }
     else if (t.app === APP.REMOTE) { surf.put(x, y, 'SSH target not configured'); surf.put(x, y + 1, 'KIJO_SSH_HOST=host  [O] attach'); }
+    else if (t.app >= APP.SYS) { surf.put(x, y, `${tag(t).toLowerCase()} tile`); surf.put(x, y + 1, 'drawn by the browser host (open kijo.html)'); }
     else surf.put(x, y, 'Pinned note / saved to state file');
   };
   if (view === 'focus') {
@@ -161,7 +162,7 @@ export async function handleKey(api, opts, key) {
 
 export async function main(argv = process.argv.slice(2)) {
   const api = await loadCore();
-  const opts = { view: 'focus', ghosts: true, notes: { ...DEFAULT_NOTES }, events: [] };
+  const opts = { view: 'focus', flow: false, ghosts: true, notes: { ...DEFAULT_NOTES }, events: [] };
   if (!argv.includes('--fresh')) opts.notes = restore(api);
   const viewArg = argv.indexOf('--view'); if (viewArg >= 0 && VIEWS.includes(argv[viewArg + 1])) opts.view = argv[viewArg + 1];
   if (argv.includes('--once') || !process.stdin.isTTY) { console.log(render(api, { ...opts, cols: process.stdout.columns || 106, rows: process.stdout.rows || 35 })); return; }
