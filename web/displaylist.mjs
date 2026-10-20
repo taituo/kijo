@@ -17,6 +17,13 @@ export const THEMES = {
   light: { ...base, name: 'light', bg: rgb('#f1efea'), barBg: rgb('#e9e6df'), panel: rgb('#fbfaf7'), raised: rgb('#ffffff'), ink: rgb('#141413'), dim: rgb('#6d6a64'),
     faint: rgb('#dcd9d2'), line: rgb('#a8a59d'), red: rgb('#c4321f'), yellow: rgb('#e0ad00'), blue: rgb('#2350d4'), onAccent: rgb('#fbfaf7'), scrim: [0.1, 0.1, 0.09, 0.45] },
 };
+export const WALLPAPERS = [{ name: 'aurora', hue: 0, seed: 0 }, { name: 'saffron', hue: 2.5, seed: 1 }, { name: 'lagoon', hue: -1.2, seed: 2 }, { name: 'orchid', hue: 0.9, seed: 3 }, { name: 'meadow', hue: -2.3, seed: 4 }];
+const white = [1, 1, 1, 1];
+// "glass": translucent panels over a procedural wallpaper (shader modes 4 and 5). Tokens keep the same
+// names as the other themes; panel/raised are markers that the helpers turn into glass.
+THEMES.glass = { ...base, name: 'glass', glass: true, radius: 16, gap: 14, bar: 46, wall: { hue: 0, seed: 0 },
+  bg: rgb('#0a0c24'), barBg: white, panel: white, raised: [1, 1, 1, 1], ink: [1, 1, 1, 1], dim: [1, 1, 1, 0.66], faint: [1, 1, 1, 0.16], line: [1, 1, 1, 0.40],
+  red: rgb('#ff6b5e'), yellow: rgb('#ffd25a'), blue: rgb('#7db2ff'), onAccent: rgb('#0b1030'), scrim: [0.02, 0.02, 0.08, 0.45] };
 export const A = (c, a) => (a === 1 ? c : [c[0], c[1], c[2], (c[3] ?? 1) * a]);
 export const statusColor = (T, s) => [T.dim, T.blue, T.yellow, T.red, T.ink][s] ?? T.dim;
 const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, 1];
@@ -57,7 +64,8 @@ export function buildDisplayList(api, st, env) {
   // Drawing helpers carry an alpha so a tile can fade as one unit.
   const mk = (al = 1) => {
     const o = {
-      fill: (x, y, w, h, c, r = 0) => cmds.push({ op: 'fill', x, y, w, h, c: A(c, al), r }),
+      glass: (x, y, w, h, c = white, r = 0, k = 0.1, m = 26) => cmds.push({ op: 'glass', x, y, w, h, c: A(c, al), r, k, m }),
+      fill: (x, y, w, h, c, r = 0) => (T.glass && (c === T.panel || c === T.raised) ? cmds.push({ op: 'glass', x, y, w, h, c: A(white, al * (c === T.raised ? 0.97 : 1)), r: r || 8, k: c === T.raised ? 0.18 : 0.1, m: Math.min(26, Math.max(6, Math.round(Math.min(w, h) * 0.3))) }) : cmds.push({ op: 'fill', x, y, w, h, c: A(c, al), r })),
       stroke: (x, y, w, h, c, t = 1, r = 0) => cmds.push({ op: 'stroke', x, y, w, h, c: A(c, al), t, r }),
       dash: (x, y, w, h, c, t = 1, d = 8, r = 0) => cmds.push({ op: 'dash', x, y, w, h, c: A(c, al), t, d, r }),
       heat: (x, y, w, h, act = 1) => cmds.push({ op: 'heat', x, y, w, h, activity: act * al }),
@@ -105,11 +113,11 @@ export function buildDisplayList(api, st, env) {
     if (t.status === 2) count.blocked++; else if (t.status === 3) count.error++; else if (t.status === 1) count.working++; else if (t.status === 4) count.done++;
   }
 
-  g.fill(0, 0, W, H, T.bg);
+  if (T.glass) cmds.push({ op: 'wall' }); else g.fill(0, 0, W, H, T.bg);
 
   // ---------------------------------------------------------------- bar (layer, exclusive zone)
   const B = T.bar, pad = Math.round(clamp(W * 0.015, 10, 26));
-  g.fill(0, 0, W, B, T.barBg); g.fill(0, B - 1, W, 1, T.faint);
+  if (T.glass) g.glass(8, 5, W - 16, B - 10, white, (B - 10) / 2, 0.09, 14); else { g.fill(0, 0, W, B, T.barBg); g.fill(0, B - 1, W, 1, T.faint); }
   const cy = (B - 14) / 2 - 1;
   g.fill(pad, B / 2 - 8, 5, 16, T.red); g.fill(pad + 7, B / 2 - 8, 5, 16, T.yellow); g.fill(pad + 14, B / 2 - 8, 5, 16, T.blue);
   let bx = pad + 34;
@@ -207,7 +215,10 @@ export function buildDisplayList(api, st, env) {
         else if (n.status === 1) fill = mix(T.panel, T.blue, 0.16);
         else if (isNote) fill = mix(T.panel, T.yellow, 0.1);
       }
-      a.fill(x, y, w, h, fill, rad);
+      if (T.glass) { // status-coloured cells become tinted glass; the rest is plain glass
+        const solid = !focus && (n.status >= 2), strong = solid ? 0.82 : 0, tintc = solid ? fill : !focus && n.status === 1 ? T.blue : isNote && !focus ? T.yellow : white;
+        a.glass(x, y, w, h, white.map((v, i) => (i < 3 ? tintc[i] : 1)), rad, solid ? strong : tintc === white ? 0.10 : 0.30, focus ? Math.min(26, Math.max(6, Math.round(Math.min(w, h) * 0.3))) : 8);
+      } else a.fill(x, y, w, h, fill, rad);
       if (n.shader === 1) a.heat(x, y, w, h, 1);
       a.stroke(x, y, w, h, focus || n.status === 0 || n.status === 1 ? T.line : fill, 1, rad);
       if (isNote) a.fill(x, y, focus ? 4 : 3, h, T.yellow);

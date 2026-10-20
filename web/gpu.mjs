@@ -65,7 +65,7 @@ export async function createGpuRenderer(canvas, { sceneWGSL, heatWGSL }) {
 
   const atlas = new GlyphAtlas();
   let atlasTex = null, sceneBG = null, instBuf = null, instCap = 0, data = new Float32Array(FLOATS * 1024);
-  const uniBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const uniBuf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const sampler = device.createSampler({ magFilter: 'nearest', minFilter: 'nearest' });
 
   const sceneModule = device.createShaderModule({ code: sceneWGSL });
@@ -132,6 +132,8 @@ export async function createGpuRenderer(canvas, { sceneWGSL, heatWGSL }) {
       for (const k of cmds) {
         const r = Math.round((k.r || 0) * dpr), box = [R(k.x), R(k.y), R(k.x + k.w) - R(k.x), R(k.y + k.h) - R(k.y)];
         if (k.op === 'fill') push(...box, k.c, 0, 0, 0, undefined, r);
+        else if (k.op === 'wall') push(0, 0, W, H, [0, 0, 0, 1], 4, 0, 0, undefined, 0);
+        else if (k.op === 'glass') { const m = R(k.m ?? 26); push(R(k.x) - m, R(k.y) - m, box[2] + 2 * m, box[3] + 2 * m, k.c, 5, m, k.k ?? 0.1, undefined, r); }
         else if (k.op === 'stroke') push(...box, k.c, 1, Math.max(1, Math.round(k.t * dpr)), 0, undefined, r);
         else if (k.op === 'dash') push(...box, k.c, 2, Math.max(1, Math.round(k.t * dpr)), k.d * dpr, undefined, r);
         else if (k.op === 'text') {
@@ -160,9 +162,9 @@ export async function createGpuRenderer(canvas, { sceneWGSL, heatWGSL }) {
         instBuf = device.createBuffer({ size: instCap * FLOATS * 4, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
       }
       device.queue.writeBuffer(instBuf, 0, data, 0, n * FLOATS);
-      device.queue.writeBuffer(uniBuf, 0, new Float32Array([W, H, time, dpr]));
+      device.queue.writeBuffer(uniBuf, 0, new Float32Array([W, H, time, dpr, theme.wall?.hue ?? 0, theme.wall?.seed ?? 0, 0, 0]));
       for (const s of segs) if (s.kind === 'heat')
-        device.queue.writeBuffer(heatBuf, s.slot * 256, new Float32Array([time, theme.name === 'dark' ? 0.55 : 0.4, s.activity, dpr]));
+        device.queue.writeBuffer(heatBuf, s.slot * 256, new Float32Array([time, theme.name === 'dark' || theme.glass ? 0.55 : 0.4, s.activity, dpr]));
 
       const enc = device.createCommandEncoder();
       const bg = theme.bg;
@@ -171,7 +173,7 @@ export async function createGpuRenderer(canvas, { sceneWGSL, heatWGSL }) {
         : context.getCurrentTexture();
       const pass = enc.beginRenderPass({ colorAttachments: [{ view: target.createView(),
         clearValue: { r: bg[0], g: bg[1], b: bg[2], a: 1 }, loadOp: 'clear', storeOp: 'store' }] });
-      const tint = theme.name === 'dark' ? theme.blue : theme.blue.map((c, i) => i < 3 ? 1 - c : 1);
+      const tint = theme.name === 'dark' || theme.glass ? theme.blue : theme.blue.map((c, i) => i < 3 ? 1 - c : 1);
       for (const s of segs) {
         if (s.kind === 'inst') {
           if (!s.count) continue;
@@ -182,7 +184,7 @@ export async function createGpuRenderer(canvas, { sceneWGSL, heatWGSL }) {
           let [x, y, w, h] = s.rect;
           x = Math.max(0, x); y = Math.max(0, y); w = Math.min(W - x, w); h = Math.min(H - y, h);
           if (w < 1 || h < 1) continue;
-          pass.setPipeline(theme.name === 'dark' ? heatAdd : heatSub);
+          pass.setPipeline(theme.name === 'dark' || theme.glass ? heatAdd : heatSub);
           pass.setBindGroup(0, heatBG, [s.slot * 256]);
           pass.setBlendConstant({ r: tint[0], g: tint[1], b: tint[2], a: 1 });
           pass.setViewport(x, y, w, h, 0, 1); pass.setScissorRect(x, y, w, h);

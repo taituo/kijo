@@ -63,6 +63,14 @@ for (const withStore of [true, false]) for (const view of ['focus', 'overview', 
   for (const k of list.cmds) assert.ok([k.x, k.y, k.w, k.h].every(Number.isFinite) || k.op === 'text', `finite geometry in ${view}`);
   if (view === 'flow' && withStore && w === 0) assert.ok(list.hits.some(h => h.kind === 'series') && list.hits.some(h => h.kind === 'tile-id'), 'flow rows are clickable');
 }
+// glass theme: wallpaper first, panels become glass ops with finite geometry, nothing else changes
+for (const view of ['focus', 'overview', 'flow', 'workspaces']) {
+  st.view = view; if (api.kijo_special_open()) dispatch(api, 'TOGGLESPECIAL'); dispatch(api, 'WORKSPACE', 3);
+  const gl = buildDisplayList(api, st, { ...env, theme: THEMES.glass, anim: new Anim() });
+  assert.equal(gl.cmds[0].op, 'wall', 'wallpaper is the first op'); assert.ok(gl.cmds.some(k => k.op === 'glass'), view + ' has glass panels');
+  for (const k of gl.cmds.filter(k => k.op === 'glass')) assert.ok([k.x, k.y, k.w, k.h, k.r, k.k, k.m].every(Number.isFinite) && k.w > 0 && k.h > 0);
+  assert.ok(!buildDisplayList(api, st, env).cmds.some(k => k.op === 'glass' || k.op === 'wall'), 'dark theme emits neither');
+}
 // key '6' selects flow and the terminal host can opt out of it
 const ui = { view: 'focus', notes: {}, events: [], bindings: {} }; handleKeyName(api, ui, '6'); assert.equal(ui.view, 'flow');
 const tui = { view: 'focus', flow: false, notes: {}, events: [], bindings: {} }; handleKeyName(api, tui, '6'); assert.equal(tui.view, 'focus');

@@ -75,6 +75,16 @@ node src/kijod.mjs                 # the relay from a checkout (KIJOD_PORT, KIJO
 On a VPS keep the loopback bind and tunnel it: `ssh -L 7501:127.0.0.1:7501 host`.
 Node 22+. Chrome with WebGPU is best; `?renderer=2d` forces the Canvas2D fallback.
 
+## Glass theme and wallpaper
+
+`?theme=glass` or palette `Theme: glass`: translucent panels over a procedural wallpaper, drawn by two
+extra shader modes in `shaders/scene.wgsl` (no textures, no assets). The wallpaper is four soft colour
+blobs on a domain-warped field that drifts slowly; `Wallpaper: aurora / saffron / lagoon / orchid /
+meadow` (key `W`) are hue and seed variants of the same function. Glass samples that function five times
+around a lens-offset point (cheap frosted blur), lifts saturation, adds a directional rim highlight,
+inner glow and a soft shadow. Because the backdrop is analytic there is no render-to-texture pass; the
+limit is that glass shows the wallpaper, not other tiles behind it. Canvas2D gets an approximation.
+
 ## Model (Hyprland-style, with ghost tiles)
 
 - **Workspaces 1-9 + special (scratchpad)**, each its own 6x6 canvas. `Alt+1..9` switches,

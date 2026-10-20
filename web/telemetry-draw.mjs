@@ -195,7 +195,7 @@ export function drawSys(c, measure, T, r, store, now, opts = {}) {
       : [['agent', f('browser.agent')], ['cores', f('browser.cores')], ['memory', f('browser.memory_gb') && f('browser.memory_gb') + ' GB'], ['screen', f('browser.screen')], ['gpu', f('browser.gpu')], ['tz', f('browser.tz')]];
     let ry = y + 72;
     for (const [k, v] of rows) { if (!v || ry + 16 > y + h - 24) continue; c.text(x, ry, k, 11, T.blue, { w: 700 }); c.text(x + 64, ry, String(v), 11, T.ink, { max: lw - 64 }); ry += 16; }
-    const pal = [T.red, T.yellow, T.blue, T.ink, T.dim, T.line, T.faint, T.panel]; pal.forEach((col, i) => c.fill(x + i * 22, y + h - 18, 20, 12, col));
+    const pal = [T.red, T.yellow, T.blue, T.ink, T.dim, T.line, T.faint, T.bg]; pal.forEach((col, i) => c.fill(x + i * 22, y + h - 18, 20, 12, col));
     cx = x + lw + 20;
   }
   // htop column

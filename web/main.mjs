@@ -6,7 +6,7 @@ import { Store, baseName } from '../src/telemetry.mjs';
 import { startBrowserInjector, installInjectors, Sources, injectInto } from './injectors.mjs';
 import { connectDaemon } from './daemon.mjs';
 import { WINDOWS, windowLabel } from './telemetry-draw.mjs';
-import { buildDisplayList, THEMES, Anim } from './displaylist.mjs';
+import { buildDisplayList, THEMES, Anim, WALLPAPERS } from './displaylist.mjs';
 import { createGpuRenderer } from './gpu.mjs';
 import { createCanvasRenderer } from './canvas2d.mjs';
 
@@ -50,7 +50,11 @@ async function boot() {
   };
 
   const media = matchMedia('(prefers-color-scheme: light)');
-  const theme = () => THEMES[params.get('theme') || (media.matches ? 'light' : 'dark')] || THEMES.dark;
+  const pref = k => { try { return localStorage.getItem(k); } catch { return null; } }, setPref = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
+  let themeName = params.get('theme') || pref('kijo.theme') || '', wallIx = Number(params.get('wall') ?? pref('kijo.wall') ?? 0) || 0;
+  const applyWall = () => { wallIx = ((wallIx % WALLPAPERS.length) + WALLPAPERS.length) % WALLPAPERS.length; THEMES.glass.wall = { hue: WALLPAPERS[wallIx].hue, seed: WALLPAPERS[wallIx].seed }; setPref('kijo.wall', wallIx); };
+  applyWall();
+  const theme = () => THEMES[themeName] || THEMES[media.matches ? 'light' : 'dark'];
   // Real values only. Anything the browser cannot know is left undefined and the bar omits it.
   const metrics = { cores: navigator.hardwareConcurrency, memory: navigator.deviceMemory ? navigator.deviceMemory + 'GB' : undefined, fps: 0,
     gpu: renderer.name + (renderer.gpu !== 'none' ? ' ' + renderer.gpu : ''), net: navigator.onLine ? 'online' : 'offline' };
@@ -109,6 +113,8 @@ async function boot() {
     for (const it of sources.list()) items.push({ title: `Source ${it.kind}: ${it.url}`, hint: it.state, run: () => { sources.remove(it.kind === 'pull' ? 'pull:' + it.url : 'ws:' + it.url); say('source removed'); } });
     for (let w = 0; w < 9; w++) items.push({ title: `Go to workspace ${w + 1}`, hint: 'alt+' + (w + 1), run: () => dispatch(api, 'WORKSPACE', w) });
     for (let w = 0; w < 9; w++) items.push({ title: `Move selected tile to workspace ${w + 1}`, hint: 'alt+shift+' + (w + 1), run: () => { if (dispatch(api, 'MOVETOWORKSPACE', w)) log(`Moved tile to workspace ${w + 1}`); else say('Nothing to move, or the workspace is full'); } });
+    for (const n of ['glass', 'dark', 'light']) items.push({ title: `Theme: ${n}`, hint: n === 'glass' ? 'W wallpaper' : '', run: () => { themeName = n; setPref('kijo.theme', n); } });
+    WALLPAPERS.forEach((w, i) => items.push({ title: `Wallpaper: ${w.name}`, hint: 'glass', run: () => { themeName = 'glass'; setPref('kijo.theme', 'glass'); wallIx = i; applyWall(); } }));
     items.push({ title: 'New note here', hint: 'N', run: () => handleKeyName(api, st, 'n') });
     items.push({ title: 'Reserve a 2x2 footprint here', hint: 'F', run: () => handleKeyName(api, st, 'f') });
     items.push({ title: 'Close selected tile', hint: 'X', run: () => handleKeyName(api, st, 'x') });
@@ -165,6 +171,7 @@ async function boot() {
       if (t.kind === 1 && t.app === APP.NOTE) { st.view = 'focus'; const cur = st.notes[t.id] ?? ''; st.editing = { id: t.id, text: cur === `Note ${t.id}` ? '' : cur }; } // auto-named notes start blank else say('[E] writes in a note tile');
       return true;
     }
+    if (ev.key === 'w' && themeName === 'glass') { wallIx++; applyWall(); say('wallpaper: ' + WALLPAPERS[wallIx].name); return true; }
     if (ev.key === '[' || ev.key === ']') { const i = WINDOWS.indexOf(st.window); st.window = WINDOWS[clampI(i + (ev.key === ']' ? 1 : -1), 0, WINDOWS.length - 1)]; say('window ' + windowLabel(st.window)); save(); return true; }
     if (st.view === 'flow' && ev.key === 'Escape') { st.view = 'focus'; return true; }
     if (ev.key === 'p' || ev.key === 'o') { say('A live shell needs the daemon: node src/kijod.mjs (terminal host: node src/host.mjs)'); return true; }

@@ -23,7 +23,19 @@ export function createCanvasRenderer(canvas) {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.textBaseline = 'top';
       for (const k of cmds) {
-        if (k.op === 'fill') { ctx.fillStyle = css(k.c); rr(k.x, k.y, k.w, k.h, k.r || 0); ctx.fill(); }
+        if (k.op === 'wall') { // approximation: the shader's blobs as radial gradients
+          const W = canvas.width / dpr, H = canvas.height / dpr, t = time * 0.035, hue = theme.wall?.hue ?? 0;
+          ctx.fillStyle = '#090b22'; ctx.fillRect(0, 0, W, H);
+          [[0.2, 0.3, '#5733c7', 0.9], [0.78, 0.25, '#0f94b3', 0.85], [0.45, 0.85, '#ed577a', 0.6], [0.92, 0.85, '#ffa852', 0.4]].forEach(([fx, fy, col, a], i) => {
+            const cx = (fx + 0.05 * Math.sin(t * 5 + i)) * W, cy = (fy + 0.05 * Math.cos(t * 4 + i * 2)) * H, g = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(W, H) * 0.55);
+            g.addColorStop(0, col + Math.round(a * 255).toString(16).padStart(2, '0')); g.addColorStop(1, col + '00'); ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+          });
+        } else if (k.op === 'glass') {
+          ctx.save(); ctx.shadowColor = 'rgba(0,0,0,0.35)'; ctx.shadowBlur = 24; ctx.shadowOffsetY = 8;
+          ctx.fillStyle = css([0.18 + k.c[0] * 0.2, 0.19 + k.c[1] * 0.2, 0.28 + k.c[2] * 0.2, 0.62 * (k.c[3] ?? 1)]); rr(k.x, k.y, k.w, k.h, k.r || 0); ctx.fill(); ctx.restore();
+          const gr = ctx.createLinearGradient(k.x, k.y, k.x + k.w * 0.4, k.y + k.h); gr.addColorStop(0, 'rgba(255,255,255,0.55)'); gr.addColorStop(0.35, 'rgba(255,255,255,0.12)'); gr.addColorStop(1, 'rgba(255,255,255,0.28)');
+          ctx.strokeStyle = gr; ctx.lineWidth = 1.5; rr(k.x + 0.75, k.y + 0.75, k.w - 1.5, k.h - 1.5, Math.max(0, (k.r || 0) - 0.75)); ctx.stroke();
+        } else if (k.op === 'fill') { ctx.fillStyle = css(k.c); rr(k.x, k.y, k.w, k.h, k.r || 0); ctx.fill(); }
         else if (k.op === 'stroke' || k.op === 'dash') {
           ctx.strokeStyle = css(k.c); ctx.lineWidth = k.t;
           ctx.setLineDash(k.op === 'dash' ? [k.d * 0.55, k.d * 0.45] : []);
