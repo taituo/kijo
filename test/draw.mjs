@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { instantiateCore, dispatch, handleKeyName, DEFAULT_BINDINGS, DEFAULT_NOTES, APP, getTiles } from '../src/core.mjs';
 import { Store } from '../src/telemetry.mjs';
-import { drawChart, drawLogs, drawTraces, drawSys, drawFlow, flowModel, fmtVal } from '../web/telemetry-draw.mjs';
+import { parseLogFilter, filterLogs, formatLogLine, drawChart, drawLogs, drawTraces, drawSys, drawFlow, flowModel, fmtVal } from '../web/telemetry-draw.mjs';
 import { buildSurface, s3Project } from '../web/surface3d.mjs';
 import { surfaceModel } from '../web/telemetry-draw.mjs';
 import { buildDisplayList, THEMES, Anim } from '../web/displaylist.mjs';
@@ -91,4 +91,26 @@ const tui = { view: 'focus', flow: false, notes: {}, events: [], bindings: {} };
 // closing a chart tile drops its binding
 if (api.kijo_special_open()) dispatch(api, 'TOGGLESPECIAL'); dispatch(api, 'WORKSPACE', 2); api.kijo_select(1, 1);
 const cu = { view: 'focus', notes: {}, events: [], bindings: { ...DEFAULT_BINDINGS } }; handleKeyName(api, cu, 'x'); assert.equal(cu.bindings[8], undefined);
-console.log('PASS — telemetry drawing: bounded ops, gaps, thresholds, logs/traces/sys, flow model, every view x workspace, status injection, bindings');
+// ---- log surface: filter language, scrolling, anchoring info, highlight
+{
+  const L = new Store(); const mk = (lvl, body, src = 'app') => L.log(body, lvl, NOW - 100000 + L.logs.length * 1000, { src });
+  for (let i = 0; i < 60; i++) mk(i % 10 === 0 ? 'error' : i % 4 === 0 ? 'warn' : 'info', `request ${i} ${i % 3 === 0 ? 'timeout upstream' : 'ok'}`, i % 2 ? 'api' : 'db');
+  assert.equal(filterLogs(L.logs, '').length, 60);
+  assert.equal(filterLogs(L.logs, 'timeout').length, 20, 'substring, case-insensitive'); assert.equal(filterLogs(L.logs, 'TIMEOUT upstream').length, 20);
+  assert.equal(filterLogs(L.logs, 'timeout -request').length, 0, '-term excludes');
+  assert.equal(filterLogs(L.logs, 'level:error').length, 6); assert.equal(filterLogs(L.logs, '>warn').length, 6 + 12, 'minimum level includes everything above');
+  assert.equal(filterLogs(L.logs, 'api level:warn').every(l => l.src === 'api' && l.level !== 'info'), true, 'terms match source and level too');
+  assert.equal(parseLogFilter('a -b level:warn').min, 2);
+  const run = (o) => { const r = rec(); const info = drawLogs(r, measure, T, { x: 0, y: 0, w: 600, h: 170 }, L, NOW, o); return { r, info }; };
+  const live = run({}), up = run({ off: 5 });
+  assert.equal(live.info.rows, 10); assert.equal(live.info.total, 60);
+  const bodies = r => r.ops.filter(o => o.op === 'text' && /^request/.test(o.str)).map(o => o.str);
+  assert.equal(bodies(live.r).at(-1), 'request 59 ok', 'live view ends at the newest line'); assert.equal(bodies(up.r).at(-1), 'request 54 timeout upstream', 'scrolled back five lines');
+  assert.equal(run({ off: 9999 }).info.off, 50, 'scroll is clamped to the oldest page'); assert.equal(bodies(run({ off: 9999 }).r)[0], 'request 0 timeout upstream');
+  const f = run({ q: 'timeout' }); assert.equal(f.info.shown, 20); assert.ok(bodies(f.r).every(b => /timeout/.test(b)), 'only matching lines are drawn');
+  assert.ok(f.r.ops.some(o => o.op === 'fill' && o.c[3] > 0.3 && o.c[3] < 0.35), 'matches are highlighted');
+  const none = run({ q: 'zzz' }); assert.match(none.r.ops[0].str, /no log line matches/); assert.equal(none.info.shown, 0);
+  assert.equal(formatLogLine({ ts: NOW, level: 'warn', body: 'x' }).slice(-7), ' WARN x'.padStart(7), 'copy format: clock, level column, body');
+}
+
+console.log('PASS — telemetry drawing: bounded ops, gaps, thresholds, logs/traces/sys, flow model, every view x workspace, status injection, bindings, log filter/scroll');

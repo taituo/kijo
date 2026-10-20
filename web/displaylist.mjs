@@ -58,7 +58,7 @@ const ago = ms => (ms < 60000 ? `${Math.round(ms / 1000)}s` : `${Math.round(ms /
 // st:  { view, ghosts, notes, events, editing:{id,text}|null, palette:{q,items,sel}|null, message }
 // env: { width, height, time, dt, theme, backend, clock, date, metrics, measure(str,size,font,weight), anim, dpr }
 export function buildDisplayList(api, st, env) {
-  const termSizes = {};
+  const termSizes = {}, logInfo = {};
   let curSurf = 0; // text drawn while this is set belongs to one selectable surface (a tile)
   const T = env.theme, cmds = [], hits = [], dt = env.dt ?? 1 / 60, W = env.width, H = env.height;
   const anim = env.anim || new Anim(); anim.begin();
@@ -243,9 +243,9 @@ export function buildDisplayList(api, st, env) {
         const editing = st.editing && st.editing.id === t.id;
         const title = isNote ? (editing ? 'editing note' : 'NOTE ' + t.id) : label(t, st.notes, bindings);
         c.text(x + ip + bs + 10, y + ip + 1, title, 15, editing ? T.blue : fg, { f: 'sans', w: 600, max: w - ip * 2 - bs - 110 });
-        const stm = t.app === APP.SHELL ? st.terms?.get(t.id) : null, capt = st.capture === t.id;
-        const state = stm ? (capt ? 'keys > shell  ^] release' : stm.exited !== null ? 'exited ' + stm.exited : stm.view > 0 ? 'scrollback -' + stm.view : 'live') : t.app >= APP.SYS ? (t.app === APP.SERIES || t.app === APP.SCENE3D ? windowLabel(winMs) : 'live') : STATUS[t.status] + (t.status === 2 && t.blockedKind ? ': ' + BLOCKED_KIND[t.blockedKind] : '');
-        const sw = measure(state, 12) + 14;
+        const stm = t.app === APP.SHELL ? st.terms?.get(t.id) : null, capt = st.capture === t.id, lgv = t.app === APP.LOGS ? st.logv?.[t.id] : null;
+        const state = lgv && (lgv.edit || lgv.q || lgv.off) ? (lgv.edit ? 'find: ' + lgv.q + (Math.floor(env.time * 2) % 2 ? '|' : ' ') : (lgv.q ? lgv.q + '  ' : '') + (lgv.off ? '-' + lgv.off + '  End = live' : 'filtered')) : stm ? (capt ? 'keys > shell  ^] release' : stm.exited !== null ? 'exited ' + stm.exited : stm.view > 0 ? 'scrollback -' + stm.view : 'live') : t.app >= APP.SYS ? (t.app === APP.SERIES || t.app === APP.SCENE3D ? windowLabel(winMs) : 'live') : STATUS[t.status] + (t.status === 2 && t.blockedKind ? ': ' + BLOCKED_KIND[t.blockedKind] : '');
+        const sw = Math.min(measure(state, 12) + 14, Math.max(110, w * 0.45));
         c.fill(x + w - ip - sw + 0, y + ip + 6, 6, 6, sc);
         c.text(x + w - ip - sw + 12 - 0, y + ip + 3, state, 12, sc === T.dim ? T.dim : sc, { max: sw });
         const by = y + ip + bs + 16, bw = w - ip * 2, M2 = env.metrics || {};
@@ -301,7 +301,7 @@ export function buildDisplayList(api, st, env) {
             const ks = keysFor(t.id);
             if (!ks.length) { c.text(cr.x, cr.y, 'unbound chart', 13, fg, { f: 'sans', w: 500 }); c.text(cr.x, cr.y + 22, 'press / and choose "Pin chart: <series>"', 12, sub, { max: bw }); c.text(cr.x, cr.y + 42, 'or inject:  queue.depth 12', 12, sub, { max: bw }); }
             else drawChart(c, measure, T, cr, store, ks, winMs, now, { mini: false });
-          } else if (t.app === APP.LOGS) drawLogs(c, measure, T, cr, store, now);
+          } else if (t.app === APP.LOGS) { const lv = st.logv?.[t.id] || {}; logInfo[t.id] = drawLogs(c, measure, T, cr, store, now, { off: lv.off, q: lv.q }); }
           else if (t.app === APP.TRACES) drawTraces(c, measure, T, cr, store, now);
           else drawSys(c, measure, T, cr, store, now, { windowMs: winMs });
         } else if (t.app === APP.REMOTE) {
@@ -452,6 +452,7 @@ export function buildDisplayList(api, st, env) {
     if (sel.kind === 2) return 'N promote to note   F 2x2 reservation   X close owner';
     if (sel.kind === 0) return 'N note   F 2x2 reservation';
     if (sel.app === APP.NOTE) return 'E write   X close   shift+arrows swap   M to next ws';
+    if (sel.app === APP.LOGS) return 'ctrl+f find (level:warn  -noise)   pgup/pgdn or wheel scroll   end live   drag selects   X close';
     if (sel.app >= APP.SYS) return 'X close   / pin series   shift+arrows swap   paste data to inject';
     return 'T state   X close   shift+arrows swap   M to next ws';
   })();
@@ -488,5 +489,5 @@ export function buildDisplayList(api, st, env) {
     const at = cmds.findIndex(k => k.op === 'text' && k.surf === st.sel.surf);
     if (at >= 0) cmds.splice(at, 0, ...r.rects.map(q => ({ op: 'fill', x: q.x, y: q.y, w: q.w, h: q.h, c: A(T.blue, 0.38), r: 2 })));
   }
-  return { cmds, hits, animating: anim.moving, selectionText, termSizes };
+  return { cmds, hits, animating: anim.moving, selectionText, termSizes, logInfo };
 }

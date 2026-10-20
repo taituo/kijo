@@ -6,7 +6,7 @@ import { Store, baseName } from '../src/telemetry.mjs';
 import { startBrowserInjector, installInjectors, Sources, injectInto } from './injectors.mjs';
 import { connectDaemon } from './daemon.mjs';
 import { VT, encodeKey, encodeMouse } from '../src/vt.mjs';
-import { WINDOWS, windowLabel } from './telemetry-draw.mjs';
+import { WINDOWS, windowLabel, filterLogs, formatLogLine } from './telemetry-draw.mjs';
 import { buildDisplayList, THEMES, Anim, WALLPAPERS } from './displaylist.mjs';
 import { createGpuRenderer } from './gpu.mjs';
 import { createCanvasRenderer } from './canvas2d.mjs';
@@ -118,6 +118,7 @@ async function boot() {
     WALLPAPERS.forEach((w, i) => items.push({ title: `Wallpaper: ${w.name}`, hint: 'glass', run: () => { themeName = 'glass'; setPref('kijo.theme', 'glass'); wallIx = i; applyWall(); } }));
     if (dstate.shell) items.push({ title: 'Terminal: new shell tile here', hint: 'kijod', run: () => { if (st.terms.size >= 4) return say('kijod allows 4 shells at a time'); const id = placeTile(api, APP.SHELL); if (!id) return say('No free slot in this workspace'); st.view = 'focus'; log(`Pinned shell as #${id}`); const t = getTiles(api).find(x => x.id === id); if (t) enterTerm(t); } });
     if (dstate.shell) items.push({ title: 'Terminal: open shell', hint: 'kijod', run: () => { const e = shellTiles().find(x => !st.terms.has(x.t.id) || st.terms.get(x.t.id).exited !== null) || shellTiles()[0]; if (!e) return say('no shell tile (Reset demo workspace restores one)'); goTo(e.w, e.i % SIDE, Math.floor(e.i / SIDE)); enterTerm(e.t); } });
+    items.push({ title: 'Logs: copy all lines (filtered)', hint: 'clipboard', run: () => { const t = selectedTile(api), q = t.app === APP.LOGS ? st.logv[t.id]?.q : ''; const text = filterLogs(store.logs, q).map(formatLogLine).join('\n'); copyText(text); } });
     items.push({ title: 'New note here', hint: 'N', run: () => handleKeyName(api, st, 'n') });
     items.push({ title: 'Reserve a 2x2 footprint here', hint: 'F', run: () => handleKeyName(api, st, 'f') });
     items.push({ title: 'Close selected tile', hint: 'X', run: () => handleKeyName(api, st, 'x') });
@@ -143,7 +144,7 @@ async function boot() {
 
   // ---- terminal tiles: a shell tile owns a VT grid fed by a kijod PTY (kijod must run with --allow-shell)
   const termById = new Map(), orphans = new Map(); let opening = 0;
-  st.terms = new Map(); st.capture = null;
+  st.terms = new Map(); st.capture = null; st.logv = {};
   const unb64 = d => Uint8Array.from(atob(d), ch => ch.charCodeAt(0));
   function makeTerm(tileId, id, cols, rows) {
     const tm = { tile: tileId, id, view: 0, exited: null, want: null, wantAt: 0, vt: null, title: '' };
@@ -230,6 +231,22 @@ async function boot() {
       else if (ev.key.length === 1 && /[\x20-\x7e]/.test(ev.key) && e.text.length < 600) e.text += ev.key;
       return true;
     }
+    { // log tile: find, scroll. Filter syntax is in telemetry-draw.mjs (parseLogFilter).
+      const lt = st.view === 'focus' ? selectedTile(api) : null, lv = lt && lt.kind === 1 && lt.app === APP.LOGS ? (st.logv[lt.id] ||= { off: 0, q: '', edit: false, n: 0 }) : null;
+      if (lv && lv.edit) {
+        if (ev.key === 'Escape') { lv.q = ''; lv.edit = false; lv.off = 0; } else if (ev.key === 'Enter') lv.edit = false;
+        else if (ev.key === 'Backspace') { lv.q = lv.q.slice(0, -1); lv.off = 0; }
+        else if (ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey && lv.q.length < 80) { lv.q += ev.key; lv.off = 0; }
+        return true;
+      }
+      if (lv && (ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'f') { lv.edit = true; return true; }
+      if (lv && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+        const page = Math.max(1, (logRows[lt.id] || 10) - 1);
+        if (ev.key === 'PageUp') { lv.off += page; return true; } if (ev.key === 'PageDown') { lv.off = Math.max(0, lv.off - page); return true; }
+        if (ev.key === 'Home') { lv.off = 1e9; return true; } if (ev.key === 'End') { lv.off = 0; return true; }
+        if (ev.key === 'Escape' && !st.sel && (lv.q || lv.off)) { lv.q = ''; lv.off = 0; return true; }
+      }
+    }
     if (ev.key === '/' || ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'k')) { openPalette(); return true; }
     if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'c' && st.sel && lastText) { copySelection(); return true; }
     if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'a' && st.view === 'focus') { const t = selectedTile(api); if (t.kind === 1 && t.app !== APP.SCENE3D) { st.sel = { surf: t.id, all: true, key: selKey() }; return true; } }
@@ -260,12 +277,13 @@ async function boot() {
   addEventListener('keydown', ev => { if (act(ev)) ev.preventDefault(); });
 
   // Copy: the text comes from the semantic text model (web/textsel.mjs), never from pixels.
-  function copySelection() {
-    const text = lastText; if (!text) return;
+  function copyText(text) {
+    if (!text) return;
     try { navigator.clipboard?.writeText(text).catch(() => {}); } catch {}
     try { document.execCommand('copy'); } catch {}
     say(`copied ${text.length} characters`);
   }
+  const copySelection = () => copyText(lastText);
   addEventListener('copy', e => { if (st.sel && lastText) { e.clipboardData.setData('text/plain', lastText); e.preventDefault(); } });
   let hits = [];
   const hitAt = ev => { for (let i = hits.length - 1; i >= 0; i--) { const h = hits[i]; if (ev.clientX >= h.x && ev.clientX < h.x + h.w && ev.clientY >= h.y && ev.clientY < h.y + h.h) return h; } return null; };
@@ -300,7 +318,7 @@ async function boot() {
   const selKey = () => st.view + ':' + (api.kijo_special_open() ? 's' : api.kijo_ws());
   // Mouse reporting: when the app in a captured terminal asked for the mouse (vim, tmux, htop...), pointer events go to it as
   // xterm sequences. Shift bypasses (select text instead), exactly as in xterm.
-  let termGeo = {}, tmDrag = null, tmCell = '';
+  let termGeo = {}, tmDrag = null, tmCell = '', logRows = {};
   const termMouse = ev => {
     if (!st.capture || ev.shiftKey) return null; const tm = st.terms.get(st.capture), g = termGeo[st.capture]; if (!tm || !g || !tm.vt.mouse || tm.exited !== null) return null;
     const cx = Math.floor((ev.clientX - g.x) / g.cw), cy = Math.floor((ev.clientY - g.y) / g.lh);
@@ -330,6 +348,7 @@ async function boot() {
   canvas.addEventListener('wheel', ev => {
     ev.preventDefault(); if (st.palette) return;
     { const h = hitAt(ev), ht = h?.kind === 'tile' && st.view === 'focus' ? getTiles(api)[h.meta] : null, tm = ht && st.terms.get(ht.id); // wheel over a terminal scrolls its history
+      if (ht?.app === APP.LOGS) { const v = (st.logv[ht.id] ||= { off: 0, q: '', edit: false, n: 0 }); v.off = Math.max(0, v.off + (ev.deltaY < 0 ? 3 : -3)); wheel = 0; return; }
       if (tm && st.capture === ht.id && tm.vt.mouse && !ev.shiftKey) { const tmo = termMouse(ev); if (tmo) sendMouse(tmo, { type: 'wheel', dy: ev.deltaY }); wheel = 0; return; } // the app owns the wheel
       if (tm) { tm.view = clampI(tm.view + (ev.deltaY < 0 ? 3 : -3), 0, tm.vt.g === tm.vt.main ? tm.vt.back.length : 0); wheel = 0; return; } }
     wheel += ev.deltaY;
@@ -364,6 +383,7 @@ async function boot() {
     const list = buildDisplayList(api, st, env);
     hits = list.hits; lastText = list.selectionText || '';
     termGeo = list.termSizes || {}; syncTerms(termGeo, now);
+    for (const id in list.logInfo || {}) { const v = st.logv[id], i = list.logInfo[id]; logRows[id] = i.rows; if (!v) continue; if (v.off > 0) v.off += i.shown - (v.n ?? i.shown); v.n = i.shown; v.off = clampI(v.off, 0, Math.max(0, i.shown - i.rows)); } // scrolled-back view stays put while new lines arrive
     if (st.terms.size && frames % 30 === 0) { // a closed tile takes its shell with it
       const live = new Set(); for (let w = 0; w < 10; w++) for (const t of getTiles(api, w)) if (t.kind === 1 && t.app === APP.SHELL) live.add(t.id);
       for (const [tid, tm] of [...st.terms]) if (!live.has(tid)) { daemon?.ptyClose(tm.id); termById.delete(tm.id); st.terms.delete(tid); if (st.capture === tid) st.capture = null; }

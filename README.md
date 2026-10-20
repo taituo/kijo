@@ -96,6 +96,11 @@ printf '\033]7501;state=blocked;kind=permission\007'     # idle | working | bloc
 loopback bind and the tunnel. At most 4 shells, 64 KB per input request. Limits: the glyph atlas is ASCII (box drawing
 folds to `+ - |`, other characters show as `?`), no wide (CJK) cells.
 
+**Log tile.** The logs tile scrolls and searches: `Ctrl+F` finds (live filter, matches highlighted), `PageUp/PageDown`, `Home`/`End` or
+the wheel scroll, and a scrolled-back view stays put while new lines arrive (`End` = follow live). Filter syntax: space-separated terms that
+must all match `level source body`, `-term` excludes, `level:warn` (or `>warn`) sets a minimum level. `Esc` clears the filter. Drag/`Ctrl+A`
+copy what is shown; palette `Logs: copy all lines (filtered)` copies the whole buffer through the same filter.
+
 The surface contract (what a tile, a surface and a scene node are, focus/capture, selection, status) is written down
 in [`docs/surface-contract.md`](docs/surface-contract.md).
 
@@ -224,7 +229,7 @@ The agent tile is a local simulation. The terminal host's `P`/`O` still take ove
 
 1. kijod adapters: declare capabilities; consequential actions need human approval. Today the relay collects and
    forwards and runs nothing, except the opt-in shell (`--allow-shell`), which is explicit shell access for the token holder.
-2. Terminal tiles: Unicode glyph atlas (and wide cells), VT parsing in a worker, a scrollable log surface with search.
+2. Terminal tiles: Unicode glyph atlas (and wide cells), VT parsing in a worker. Logs: retention beyond the in-memory window (kijod keeps 600 lines), structured field filters.
 3. Herdr adapter via `herdr terminal session observe|control` (NDJSON) and `herdr session list --json`.
 4. Hyprland adapter via `hyprctl` socket for mirroring real workspaces.
 5. Theme tokens (radius, gap, palette, motion) exposed as JSON; a full native host (spike exists: port the display-list builder, glyph atlas and the remaining ops); render-to-texture glass over tiles; an accessibility mirror of the text model.

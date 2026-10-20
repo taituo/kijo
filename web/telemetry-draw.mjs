@@ -139,10 +139,39 @@ export function drawSpark(c, measure, T, r, store, key, windowMs, now) {
 
 // ------------------------------------------------------------------ logs
 const TD_LEVEL = (T, l) => (l === 'error' ? T.red : l === 'warn' ? T.yellow : l === 'debug' ? T.faint : T.dim);
+// Log filter: space-separated terms, all must match (case-insensitive) against "level src body"; -term excludes;
+// `level:warn` (or `>warn`) sets a minimum level. Pure, so the tile, the tests and "copy logs" share one definition.
+const TD_LEVELS = ['debug', 'info', 'warn', 'error'];
+export function parseLogFilter(q) {
+  const f = { terms: [], not: [], min: 0 };
+  for (const raw of String(q || '').toLowerCase().split(/\s+/).filter(Boolean)) {
+    const lv = raw.match(/^(?:level:|>=?)(debug|info|warn|error)$/);
+    if (lv) f.min = TD_LEVELS.indexOf(lv[1]); else if (raw[0] === '-' && raw.length > 1) f.not.push(raw.slice(1)); else f.terms.push(raw);
+  }
+  return f;
+}
+export function filterLogs(logs, q) {
+  const f = typeof q === 'object' && q ? q : parseLogFilter(q);
+  if (!f.terms.length && !f.not.length && !f.min) return logs;
+  return logs.filter(l => {
+    if (TD_LEVELS.indexOf(l.level) < f.min) return false;
+    const hay = (l.level + ' ' + (l.src || '') + ' ' + l.body).toLowerCase();
+    return f.terms.every(t => hay.includes(t)) && !f.not.some(t => hay.includes(t));
+  });
+}
+export const formatLogLine = l => `${tdClock(l.ts)} ${l.level === 'info' ? '    ' : l.level.toUpperCase().slice(0, 4).padEnd(4)} ${l.body}`;
+
+// opts: mini, off (rows scrolled back from the newest), q (filter). Returns { total, shown, rows, off } for the header and scroll anchoring.
 export function drawLogs(c, measure, T, r, store, now, opts = {}) {
   const { x, y, w, h } = r, rowH = opts.mini ? 14 : 17, size = opts.mini ? 10 : 11, rows = Math.max(1, Math.floor(h / rowH));
-  const list = store.logs.slice(-rows);
-  if (!list.length) { c.text(x, y, 'no logs yet', 12, T.dim, { max: w }); c.text(x, y + 18, 'inject:  {"t":"log","level":"warn","body":"..."}', 11, T.dim, { max: w }); return; }
+  const filt = parseLogFilter(opts.q), all = filterLogs(store.logs, filt), total = store.logs.length;
+  const off = Math.max(0, Math.min(opts.off || 0, Math.max(0, all.length - rows))), end = all.length - off, list = all.slice(Math.max(0, end - rows), end);
+  const info = { total, shown: all.length, rows, off };
+  if (!list.length) {
+    if (total && all.length === 0) { c.text(x, y, 'no log line matches', 12, T.dim, { max: w }); c.text(x, y + 18, `${total} lines hidden by the filter; Esc clears it`, 11, T.dim, { max: w }); }
+    else { c.text(x, y, 'no logs yet', 12, T.dim, { max: w }); c.text(x, y + 18, 'inject:  {"t":"log","level":"warn","body":"..."}', 11, T.dim, { max: w }); }
+    return info;
+  }
   const top = y + h - list.length * rowH, tw = measure('00:00:00 ', size);
   list.forEach((l, i) => {
     const yy = top + i * rowH, col = TD_LEVEL(T, l.level);
@@ -151,8 +180,13 @@ export function drawLogs(c, measure, T, r, store, now, opts = {}) {
     if (!opts.mini) { c.text(cx, yy, tdClock(l.ts), size, T.dim); cx += tw; }
     const tag = l.level === 'info' ? '' : l.level.toUpperCase().slice(0, 4) + ' ';
     if (tag) cx += c.text(cx, yy, tag, size, l.level === 'debug' ? T.dim : col, { w: 700 });
+    if (!opts.mini) for (const t of filt.terms) { // highlight matches in the body, under the glyphs
+      const lo = l.body.toLowerCase(); let k = lo.indexOf(t);
+      while (k >= 0 && k < 200) { const hx = cx + measure(l.body.slice(0, k), size), hw = measure(t, size); if (hx + hw <= x + w) c.fill(hx, yy, hw, rowH - 2, T.yellow.slice(0, 3).concat(0.32)); k = lo.indexOf(t, k + t.length); }
+    }
     c.text(cx, yy, l.body, size, l.level === 'error' ? T.ink : tdAlpha(T.ink, l.level === 'debug' ? 0.55 : 0.9), { max: x + w - cx });
   });
+  return info;
 }
 
 // ------------------------------------------------------------------ traces
