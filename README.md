@@ -1,60 +1,68 @@
-# Kijo — first spatial prototype
+# Kijo / spatial core 0.2 — WASM first, no HTML
 
-An intentionally plain, Bauhaus-adjacent **functional wireframe**, influenced by the wireframe approach in [Crew's README](https://github.com/taituo/crewpi#screens). No decorative desktop cards, no pretend remote connections.
+Kijo is **not a browser desktop**. It is an experimental runtime for one structured spatial scene shared across native and remote presentation layers.
+
+The first executable slice is deliberately plain and usable: a **real WebAssembly module** containing the layout, focus, ownership, scene-graph generation and state transitions, hosted by a **native terminal renderer**. It works over SSH on a headless Linux VPS without X11, Wayland, Chromium, or a browser.
+
+```text
+local filesystem / SSH / OS metrics / future agent connectors
+                        |
+                host adapter (Node v22)
+                  |           |
+             WASM memory   terminal I/O
+                  |
+        [structured scene nodes]
+                  |
+           ANSI renderer (now)
+                  |
+            Ghostty / SSH
+
+Future adapters: native wgpu compositor, remote scene transport,
+mobile renderer; no DOM-based presentation is required.
+```
 
 ## Run
 
-Open `index.html` in any modern browser. No installation, build step, or server needed. To serve it over a network or from a VPS:
+```sh
+node src/host.mjs --once           # show 2x2 snapshot; zero dependencies
+node src/host.mjs --view overview --once
+node src/host.mjs                  # interactive; requires terminal
+npm test
+```
+
+Node.js 22+ is needed for the initial host. `core/scene.wasm.b64` is checked in as a portable precompiled module (~5–6KB decoded), so you can run without Clang. Local builds create `core/scene.wasm`. Rebuild with a Clang that supports `--target=wasm32`:
 
 ```sh
-python3 -m http.server 8080
+./build.sh
 ```
 
-Open `http://localhost:8080`.
+## Interaction
 
-## Interactions
+Use `1`–`4` for focus, 6x6 overview, wiring and timeline. Arrow keys select slots. `Enter` zooms from overview to focus; `n` promotes a selected ghost to an independently owned note; `x` closes the selected tile and **only ghosts it still owns**; `t` cycles a demo status. `g` shows/hides ghost outlines; `r` resets; `q` quits. `p` temporarily opens a **real local shell** when the shell tile is selected; it returns to Kijo on exit. Set `KIJO_SSH_HOST=hostname` and select the SSH tile, then press `o` to attach via SSH. This attachment temporarily takes over the terminal; it is **not** yet embedded pane multiplexing.
 
-- **Focus / 2×2**: exactly four logical positions. A content tile never stretches to fill an emptied sibling slot.
-- **Overview / 6×6**: same logical cells, represented as a heatmap. Click a cell to enter its neighborhood.
-- **Ghosts**: turn on to inspect reserved slots. Click a ghost to replace it with a persistent independent note.
-- **Close tile**: removes its own ghosts, never a converted note or unrelated tile.
-- **Search**: Ctrl/Cmd+K or `/` finds and locates tiles.
-- **Arrow keys**: pan the 2×2 focus viewport, `-` to overview, `+` to focus, `g` to show ghosts.
-- **Notes**: saved in localStorage. Export and import JSON for backup.
-- **Back / Wiring**: explicit view of demonstrative data paths and currently unconnected remote adapter.
-- **Time / Activity**: activity reads the same event model as other views; Gantt rows are explicitly illustrative.
-- **Advance demo**: cycles simulated agent status and records events. Not a running agent.
-- **Optional WebGL2 shader**: an opt-in sample compositor layer. Off by default, disabled when reduced motion is requested.
-- **Real browser sensor**: reads online/offline and viewport from the browser, separately labeled from demo data.
-- **WebSocket adapter**: `Connect data feed` accepts a `ws://` or `wss://` endpoint broadcasting known-tile status events.
+Saved workspace state and notes are stored under `~/.local/state/kijo/state.json` (or `KIJO_STATE_FILE`). `--fresh` ignores saved state.
 
-## WebSocket adapter contract
+## The actual WASM contract
 
-Send UTF-8 JSON messages like:
+`core/scene.c` compiles to `core/scene.wasm`. It exports typed arrays in linear memory using ABI v1, queried via `kijo_tile_ptr`, `kijo_node_ptr`, `kijo_node_count`, and `kijo_build_scene(view)`. One scene supports focus, overview heatmap, wiring, and timeline. The host reads nodes with semantic types, grid coordinates, state, ownership, material and shader identifiers. Renderers are adapters; **layout is not recomputed by individual renderers**.
 
-```json
-{"type":"status","id":"ops-1","status":"working"}
-```
+Ownership uses a group ID **and creation transaction**. Promoting a ghost detaches ownership. Closing a parent removes its remaining owned placeholders and preserves independently occupied slots. `npm test` verifies this invariant.
 
-Or:
+## Shaders and future native compositor
 
-```json
-{"type":"event","label":"Index updated","status":"done"}
-```
+Shaders are a rendering concern, not WASM's job. `shaders/heatmap.wgsl` is an example WGSL activity material for a planned **native wgpu/WebGPU host**; the shader is not executed by the current ANSI adapter. Semantic statuses and accessibility must remain available without GPU effects. A real renderer can eventually support signed WASM app modules, GPU composition, text shaping, multi-monitor focus, and remote input/frame transport.
 
-Allowed statuses are `active`, `working`, `blocked`, `idle`, `done`. Unknown IDs are ignored. A real SSH/PTy/Ghostty/Herdr service requires a trusted server-side bridge; the HTML file alone cannot provide these capabilities.
+## Remote and phone ambitions
 
-## Core model
+A VPS can already run the terminal host over SSH (no X server). However, a **true remote pixel desktop** requires a separate GPU/software compositor and network transport, while a phone needs an adaptive renderer and input protocol. This prototype does not provide these yet. Herdr, Ghostty session embedding, OSC 7501, sandboxing and authenticated connectors are follow-on integrations—not simulated as working.
 
-The spatial model is six by six, with **content tiles** and **ghost reservations** as separate records. Each ghost carries an owning tile ID and a group ID. Converting a ghost into a note removes the reservation before inserting independent content. Closing an owner filters only its still-owned ghost reservations; other content is preserved.
+## Design constraints
 
-This is not yet a compositor or an operating system. Native WebAssembly apps, Ghostty rendering, real Herdr/SSH session transport, OSC 7501 parsing, security, a proper GPU compositing engine, remote persistent sessions, multi-device sync, and actual cron/agent orchestration are future engineering work, not claimed demo features.
+- **Bauhaus wireframe first:** restrained, minimal 2x2 primary focus; 6x6 overview is a separate zoom level, not 36 widgets always on screen.
+- **No HTML, DOM, CSS or browser-based renderer.**
+- **One structured scene, many render targets.**
+- **WASM owns spatial invariants; GPU native layer eventually owns drawing.**
+- **Adapters distinguish local metrics from simulated agent status.**
+- **Future agent tools need explicit permission and human approval for consequential operations.**
 
-## Architecture direction
-
-- UI / model: mobile and large-screen layouts from the same immutable-addressable grid coordinates and event model.
-- Runtime: browser DOM today; future WASM applications and isolated adapters.
-- Graphics: separate content, layout, and optional shader render passes; WebGL2 proof of feasibility today, WebGPU later.
-- Data: typed event envelope; remote WS transport; secure server-side connectors (SSH, Herdr, Ghostty sessions, OSC 7501, workflows) in later milestones.
-- Trust: human approval and least-privilege capabilities, as demonstrated in Crew.
-- Design: no theming system until the layout, ghost semantics, and runtime interaction are validated.
+This is a working *architecture demonstrator*, not yet a finished GUI desktop.
