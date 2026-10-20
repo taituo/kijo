@@ -21,6 +21,10 @@ The browser is only a GPU surface here: `web/index.html` contains a single `<can
 (bar, tiles, text, palette) comes from a display list built from the WASM scene and drawn with
 WebGPU (Canvas2D fallback). There is no DOM UI, no CSS layout, no HTML components.
 
+Nothing here is a fixed constraint: DOM, canvas and native surfaces may be combined, GPU surfaces sit beside
+text and PTY surfaces, and 6x6 is today's grid, not the design. The seams that keep that possible are written
+down in [`docs/surface-contract.md`](docs/surface-contract.md) (tracking issue #1).
+
 ## Nothing to install
 
 The browser **is** the runtime. Open `dist/kijo.html` (one file, WASM and shaders inlined) and you
@@ -94,6 +98,29 @@ folds to `+ - |`, other characters show as `?`), no mouse reporting yet, no wide
 
 The surface contract (what a tile, a surface and a scene node are, focus/capture, selection, status) is written down
 in [`docs/surface-contract.md`](docs/surface-contract.md).
+
+## How fast
+
+Measured on loopback in the test sandbox (software GPU, so no GPU numbers; check `fps` / `draw_ms` in the bar on your own machine):
+
+| | |
+|---|---|
+| keystroke echo, browser to PTY and back through kijod | ~1.4 ms median (add your network RTT over an SSH tunnel) |
+| PTY output through the relay | ~21 MB/s |
+| VT emulator parse, coloured text | ~17 MB/s |
+| display list for a 1080p frame with a busy 160x50 terminal | ~0.7 ms median |
+
+Output after a quiet moment is sent at once; only bursts are coalesced into ~16 ms frames. The VT parser runs on the
+main thread, so a multi-hundred-megabyte `cat` will stutter; moving it to a worker is on the roadmap.
+
+## Layout of the repo
+
+```text
+core/    scene.c (the WASM core) and its build        src/    core.mjs, vt.mjs, telemetry.mjs, kijod.mjs, hosts, bundler
+web/     Chrome host: display list, renderers,        shaders/ WGSL (scene, heatmap, 3D surface)
+         terminal, text selection, injectors          docs/    surface-contract.md
+test/    unit, drawing, daemon (incl. real PTY) and real-Chrome E2E tests      dist/  built single-file artifacts
+```
 
 ## Run
 
@@ -172,17 +199,17 @@ there is no synthetic data in the app (tests use fixtures, labelled as such).
 Also real since 0.5: selectable/copyable text on every text surface, the VT emulator, PTY-backed terminal tiles
 through kijod (opt-in), OSC 7501 parsed from the PTY stream into tile status.
 
-Not built yet, and labelled as such in the UI: SSH/Herdr attach, mouse reporting, OTLP/protobuf, agent execution. The agent tile is a local simulation. The terminal host's `P`/`O` still take over the
-terminal for a real shell/SSH session.
+Not built yet, and labelled as such in the UI: SSH/Herdr attach, mouse reporting, OTLP/protobuf, agent execution.
+The agent tile is a local simulation. The terminal host's `P`/`O` still take over the terminal for a real shell/SSH session.
 
 ## Roadmap
 
-1. kijod adapters: declare capabilities, consequential actions need human approval (the relay
-   itself is read-only toward the host: it collects and forwards, it never executes).
-2. Terminal tiles: more than one shell per host, mouse reporting, Unicode glyph atlas, a scrollable log surface with search.
+1. kijod adapters: declare capabilities; consequential actions need human approval. Today the relay collects and
+   forwards and runs nothing, except the opt-in shell (`--allow-shell`), which is explicit shell access for the token holder.
+2. Terminal tiles: more than one shell per host, mouse reporting, Unicode glyph atlas, VT parsing in a worker, a scrollable log surface with search.
 3. Herdr adapter via `herdr terminal session observe|control` (NDJSON) and `herdr session list --json`.
 4. Hyprland adapter via `hyprctl` socket for mirroring real workspaces.
-5. Theme tokens (radius, gap, palette, motion) exposed as JSON; native wgpu host.
+5. Theme tokens (radius, gap, palette, motion) exposed as JSON; native wgpu host (same core, same display-list ops); render-to-texture glass over tiles; an accessibility mirror of the text model.
 
 ## Design constraints
 
