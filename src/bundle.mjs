@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const read = p => readFileSync(resolve(root, p), 'utf8');
-const WEB = ['web/fonts.mjs', 'src/core.mjs', 'src/telemetry.mjs', 'web/injectors.mjs', 'web/daemon.mjs', 'web/telemetry-draw.mjs', 'web/displaylist.mjs', 'web/surface3d.mjs', 'web/gpu.mjs', 'web/canvas2d.mjs', 'web/main.mjs'];
+const WEB = ['web/fonts.mjs', 'src/core.mjs', 'src/telemetry.mjs', 'web/injectors.mjs', 'web/daemon.mjs', 'web/telemetry-draw.mjs', 'web/textsel.mjs', 'web/displaylist.mjs', 'web/surface3d.mjs', 'web/gpu.mjs', 'web/canvas2d.mjs', 'web/main.mjs'];
 const strip = src => src
   .replace(/^import\s[^;]+;\s*$/gm, '')
   .replace(/^export\s*\{[^}]*\};?\s*$/gm, '')

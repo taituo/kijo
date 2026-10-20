@@ -8,6 +8,7 @@
 import { NODE, FLAG, STATUS, BLOCKED_KIND, APP, SCALE, EVENT, getScene, getTiles, getEvents, label, tag, selectedTile } from '../src/core.mjs';
 import { drawChart, drawSpark, drawLogs, drawTraces, drawSys, drawFlow, surfaceModel, fmtVal, windowLabel, shortName } from './telemetry-draw.mjs';
 import { baseName } from '../src/telemetry.mjs';
+import { selection } from './textsel.mjs';
 
 const rgb = h => [parseInt(h.slice(1, 3), 16) / 255, parseInt(h.slice(3, 5), 16) / 255, parseInt(h.slice(5, 7), 16) / 255, 1];
 const base = { radius: 6, gap: 10, bar: 38, hint: 28 };
@@ -56,6 +57,7 @@ const ago = ms => (ms < 60000 ? `${Math.round(ms / 1000)}s` : `${Math.round(ms /
 // st:  { view, ghosts, notes, events, editing:{id,text}|null, palette:{q,items,sel}|null, message }
 // env: { width, height, time, dt, theme, backend, clock, date, metrics, measure(str,size,font,weight), anim, dpr }
 export function buildDisplayList(api, st, env) {
+  let curSurf = 0; // text drawn while this is set belongs to one selectable surface (a tile)
   const T = env.theme, cmds = [], hits = [], dt = env.dt ?? 1 / 60, W = env.width, H = env.height;
   const anim = env.anim || new Anim(); anim.begin();
   const measure = (s, size, f = 'mono', w = 400) => env.measure(s, size, f, w);
@@ -76,7 +78,7 @@ export function buildDisplayList(api, st, env) {
           while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (measure(str.slice(0, mid) + '..', size, f, w) <= max) lo = mid; else hi = mid - 1; }
           str = lo > 0 ? str.slice(0, lo) + '..' : '';
         }
-        if (str) cmds.push({ op: 'text', x, y, s: size, c: A(c, al), str, f, w });
+        if (str) cmds.push({ op: 'text', x, y, s: size, c: A(c, al), str, f, w, surf: curSurf || undefined });
         return measure(str, size, f, w);
       },
       wrap(x, y, str, size, c, maxW, maxLines, lh, opts = {}) {
@@ -244,6 +246,7 @@ export function buildDisplayList(api, st, env) {
         c.fill(x + w - ip - sw + 0, y + ip + 6, 6, 6, sc);
         c.text(x + w - ip - sw + 12 - 0, y + ip + 3, state, 12, sc === T.dim ? T.dim : sc, { max: sw });
         const by = y + ip + bs + 16, bw = w - ip * 2, M2 = env.metrics || {};
+        curSurf = t.id; // content below the header is the selectable surface
         if (t.progress > 0 || t.status === 1) {
           c.fill(x + ip, y + h - ip - 4, bw, 4, T.faint, 2);
           if (t.progress > 0) c.fill(x + ip, y + h - ip - 4, bw * t.progress / 100, 4, T.blue, 2);
@@ -324,6 +327,7 @@ export function buildDisplayList(api, st, env) {
         if (selected) { c.text(x + ip, y + h - ip - 30, '[N] note   [F] 2x2 reservation', 12, T.ink, { max: w - ip * 2 }); c.text(x + ip, y + h - ip - 14, 'fills only what you reserve', 11, T.dim, { max: w - ip * 2 }); }
       } else if (!focus && selected) c.text(x + w / 2 - 3, y + h / 2 - 8, '+', 14, T.dim);
     }
+    curSurf = 0;
     ring();
     if (!focus && (n.flags & FLAG.IN_VIEWPORT) && n.kind !== NODE.TILE) a.fill(x + w - 9, y + 5, 4, 4, T.blue, 2);
   }
@@ -459,5 +463,12 @@ export function buildDisplayList(api, st, env) {
     });
     if (!shown.length) g.text(px + 22, py + 68, 'nothing matches', 14, T.dim, { f: 'sans' });
   }
-  return { cmds, hits, animating: anim.moving };
+  // Selection highlight goes under the selected surface's text; the text itself is handed back for copy.
+  let selectionText = '';
+  if (st.sel && !st.palette) {
+    const r = selection(cmds, st.sel, measure); selectionText = r.text;
+    const at = cmds.findIndex(k => k.op === 'text' && k.surf === st.sel.surf);
+    if (at >= 0) cmds.splice(at, 0, ...r.rects.map(q => ({ op: 'fill', x: q.x, y: q.y, w: q.w, h: q.h, c: A(T.blue, 0.38), r: 2 })));
+  }
+  return { cmds, hits, animating: anim.moving, selectionText };
 }

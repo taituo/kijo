@@ -69,6 +69,19 @@ assert.equal(await q(() => __kijo.st.cam.manual === true && Math.abs(__kijo.st.c
 await page.keyboard.press('/'); await page.keyboard.type('pin 3d'); await page.keyboard.press('Enter');
 assert.equal(await q(() => __kijo.tiles(4).filter(t => t.kind === 1 && t.app === 11).length), 2, 'palette pins another 3D surface');
 
+// ---- selectable, copyable text: drag over a logs tile, Ctrl+C puts the text (not pixels) on the clipboard
+await page.goto(BUNDLE + '?renderer=2d&fresh'); await page.waitForFunction(() => globalThis.__kijo?.frames > 5);
+await q(() => { kijo.inject('{"t":"log","level":"warn","body":"copy me: disk almost full"}', 'e2e-sel'); kijo.inject('{"t":"log","level":"info","body":"second line to copy"}', 'e2e-sel'); });
+await page.keyboard.press('Alt+Digit5'); await page.waitForTimeout(900);
+await q(() => { globalThis.__copied = null; addEventListener('copy', e => { globalThis.__copied = e.clipboardData.getData('text/plain'); }); });
+await page.mouse.move(660, 110); await page.mouse.down(); await page.mouse.move(1100, 445, { steps: 6 }); await page.mouse.up(); await page.waitForTimeout(300);
+const picked = await q(() => __kijo.selectedText());
+assert.match(picked, /copy me: disk almost full/); assert.match(picked, /second line to copy/);
+await page.keyboard.press('Control+c'); await page.waitForTimeout(200);
+assert.match(await q(() => globalThis.__copied), /copy me: disk almost full/, 'Ctrl+C copies the selected text');
+await page.keyboard.press('Escape'); assert.equal(await q(() => __kijo.st.sel), null, 'Escape clears the selection');
+await page.keyboard.press('Control+a'); await page.waitForTimeout(200); assert.match(await q(() => __kijo.selectedText()), /second line to copy/, 'Ctrl+A selects the focused tile');
+
 // ---- optional relay: same page, remote injector, token only in the fragment
 const { startDaemon } = await import('../src/kijod.mjs');
 const d = await startDaemon({ port: 0, token: 'e2e-token', collect: true, ui: bundle(), quiet: true });

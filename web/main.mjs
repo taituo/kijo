@@ -157,6 +157,9 @@ async function boot() {
       return true;
     }
     if (ev.key === '/' || ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'k')) { openPalette(); return true; }
+    if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'c' && st.sel && lastText) { copySelection(); return true; }
+    if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'a' && st.view === 'focus') { const t = selectedTile(api); if (t.kind === 1 && t.app !== APP.SCENE3D) { st.sel = { surf: t.id, all: true, key: selKey() }; return true; } }
+    if (ev.key === 'Escape' && st.sel) { st.sel = null; return true; }
     if (ev.ctrlKey || ev.metaKey) return false;
     // Hyprland-style: Alt+1..9 workspace, Alt+Shift+1..9 move the selected tile there.
     if (ev.altKey && /^Digit[1-9]$/.test(ev.code || '')) {
@@ -181,6 +184,14 @@ async function boot() {
   }
   addEventListener('keydown', ev => { if (act(ev)) ev.preventDefault(); });
 
+  // Copy: the text comes from the semantic text model (web/textsel.mjs), never from pixels.
+  function copySelection() {
+    const text = lastText; if (!text) return;
+    try { navigator.clipboard?.writeText(text).catch(() => {}); } catch {}
+    try { document.execCommand('copy'); } catch {}
+    say(`copied ${text.length} characters`);
+  }
+  addEventListener('copy', e => { if (st.sel && lastText) { e.clipboardData.setData('text/plain', lastText); e.preventDefault(); } });
   let hits = [];
   const hitAt = ev => { for (let i = hits.length - 1; i >= 0; i--) { const h = hits[i]; if (ev.clientX >= h.x && ev.clientX < h.x + h.w && ev.clientY >= h.y && ev.clientY < h.y + h.h) return h; } return null; };
   function activate(h, double) {
@@ -210,13 +221,18 @@ async function boot() {
     }
   }
   // 3D surface tiles: drag to orbit (yaw/pitch live in st.cam, the display list just reads them).
-  let drag = null;
+  let drag = null, selDrag = null, lastText = '';
+  const selKey = () => st.view + ':' + (api.kijo_special_open() ? 's' : api.kijo_ws());
   canvas.addEventListener('pointerdown', ev => {
-    const h = hitAt(ev); activate(h, false);
+    const h = hitAt(ev); activate(h, false); st.sel = null;
+    const tt = h?.kind === 'tile' && st.view === 'focus' && !st.palette && !st.editing ? getTiles(api)[h.meta] : null;
+    if (tt && tt.app !== APP.SCENE3D) selDrag = { surf: tt.id, ax: ev.clientX, ay: ev.clientY, key: selKey() };
     if (h?.kind === 'tile' && getTiles(api)[h.meta]?.app === APP.SCENE3D) { drag = { x: ev.clientX, y: ev.clientY, yaw: st.cam.manual ? st.cam.yaw : st.cam.yaw + (performance.now() - t0) / 1000 * 0.15, pitch: st.cam.pitch }; canvas.setPointerCapture?.(ev.pointerId); }
   });
-  canvas.addEventListener('pointermove', ev => { if (!drag) return; st.cam.manual = true; st.cam.yaw = drag.yaw - (ev.clientX - drag.x) * 0.008; st.cam.pitch = Math.max(0.08, Math.min(1.45, drag.pitch + (ev.clientY - drag.y) * 0.006)); });
-  const endDrag = () => { drag = null; };
+  canvas.addEventListener('pointermove', ev => {
+    if (selDrag && (Math.hypot(ev.clientX - selDrag.ax, ev.clientY - selDrag.ay) > 4 || st.sel)) st.sel = { surf: selDrag.surf, ax: selDrag.ax, ay: selDrag.ay, bx: ev.clientX, by: ev.clientY, key: selDrag.key };
+    if (!drag) return; st.cam.manual = true; st.cam.yaw = drag.yaw - (ev.clientX - drag.x) * 0.008; st.cam.pitch = Math.max(0.08, Math.min(1.45, drag.pitch + (ev.clientY - drag.y) * 0.006)); });
+  const endDrag = () => { drag = null; selDrag = null; if (st.sel && !lastText) st.sel = null; };
   canvas.addEventListener('pointerup', endDrag); canvas.addEventListener('pointercancel', endDrag);
   canvas.addEventListener('dblclick', ev => { const h = hitAt(ev); if (h?.kind === 'tile' && getTiles(api)[h.meta]?.app === APP.SCENE3D) { st.cam.manual = false; return; } activate(h, true); });
   let wheel = 0;
@@ -252,10 +268,11 @@ async function boot() {
     env.store = store; env.now = wall; env.daemon = dstate.state === 'off' ? null : dstate;
     const p0 = performance.now();
     const list = buildDisplayList(api, st, env);
-    hits = list.hits;
+    hits = list.hits; lastText = list.selectionText || '';
+    if (st.sel && st.sel.key !== selKey()) { st.sel = null; lastText = ''; }
     renderer.draw(list, env);
     drawAcc += performance.now() - p0; drawN++; lastCmds = list.cmds.length;
-    globalThis.__kijo = { api, st, store, anim, act, sources, connect, tiles: w => getTiles(api, w), renderer: renderer.name, rendererObj: renderer, frames: (globalThis.__kijo?.frames || 0) + 1 };
+    globalThis.__kijo = { api, st, store, anim, act, sources, connect, tiles: w => getTiles(api, w), selectedText: () => lastText, renderer: renderer.name, rendererObj: renderer, frames: (globalThis.__kijo?.frames || 0) + 1 };
     requestAnimationFrame(frame);
   }
   log(`Kijo started / ${renderer.name}${renderer.gpu !== 'none' ? ' / ' + renderer.gpu : ''}`);

@@ -1,0 +1,40 @@
+import assert from 'node:assert/strict';
+import { selection, surfaceLines } from '../web/textsel.mjs';
+import { instantiateCore, DEFAULT_NOTES, DEFAULT_BINDINGS } from '../src/core.mjs';
+import { readFileSync } from 'node:fs';
+import { buildDisplayList, THEMES, Anim } from '../web/displaylist.mjs';
+import { Store } from '../src/telemetry.mjs';
+
+const m = (s, z) => String(s).length * z * 0.6; // fixed-pitch fake font: 6 px per char at size 10
+const t = (x, y, str, surf = 1, s = 10) => ({ op: 'text', x, y, s, str, f: 'mono', w: 400, surf });
+const cmds = [t(10, 10, 'alpha beta'), t(10, 24, 'gamma'), t(100, 24, 'delta'), t(10, 38, 'last line'), t(10, 10, 'OTHER SURFACE', 2), t(300, 10, 'ignored', 0)];
+
+// ---- reading order and joining: runs on one line keep their column gap
+const lines = surfaceLines(cmds, 1);
+assert.equal(lines.length, 3); assert.deepEqual(lines.map(l => l.runs.length), [1, 2, 1]);
+assert.equal(selection(cmds, { surf: 1, all: true }, m).text, 'alpha beta\ngamma' + ' '.repeat(8) + 'delta\nlast line', 'gaps become spaces, capped at 8');
+assert.equal(selection(cmds, { surf: 2, all: true }, m).text, 'OTHER SURFACE', 'surfaces never leak into each other');
+
+// ---- drag selection: partial first and last lines, direction does not matter
+const down = selection(cmds, { surf: 1, ax: 10 + 6 * 6, ay: 12, bx: 10 + 6 * 3, by: 40 }, m); // from "beta"[0] on line 1 back to "las"... on line 3
+assert.equal(down.text, 'beta\ngamma' + ' '.repeat(8) + 'delta\nlas');
+const up = selection(cmds, { surf: 1, ax: 10 + 6 * 3, ay: 40, bx: 10 + 6 * 6, by: 12 }, m); assert.equal(up.text, down.text, 'selecting backwards gives the same text');
+assert.equal(selection(cmds, { surf: 1, ax: 10 + 6 * 2, ay: 12, bx: 10 + 6 * 7, by: 12 }, m).text, 'pha b', 'within one run, character precise');
+assert.equal(selection(cmds, { surf: 9, all: true }, m).text, '', 'empty surface selects nothing');
+assert.equal(selection(cmds, null, m).text, '');
+// highlight rectangles cover exactly the selected characters
+const r1 = selection(cmds, { surf: 1, ax: 10 + 6 * 2, ay: 12, bx: 10 + 6 * 7, by: 12 }, m).rects; assert.equal(r1.length, 1); assert.ok(Math.abs(r1[0].x - 22) < 1.5 && Math.abs(r1[0].w - 30) < 1.5);
+
+// ---- real display list: a logs tile is selectable and copyable as text, not pixels
+const api = await instantiateCore(readFileSync(new URL('../core/scene.wasm', import.meta.url))); api.kijo_reset(); api.kijo_dispatch(2, 3, 0); // workspace 4
+const store = new Store(); const NOW = 2e12; store.log('first entry', 'info', NOW - 2000); store.log('disk almost full', 'warn', NOW - 1000);
+const T = THEMES.dark, env = { width: 1280, height: 800, dpr: 1, time: 1, dt: Infinity, theme: T, anim: new Anim(), backend: 'T', clock: '12:00', date: 'x', metrics: {}, measure: m, store, now: NOW };
+const st = { view: 'focus', ghosts: false, notes: { ...DEFAULT_NOTES }, bindings: { ...DEFAULT_BINDINGS }, window: 300000, events: [], editing: null, palette: null, message: '' };
+api.kijo_dispatch(2, 4, 0); api.kijo_select(2, 1); // workspace 5 (logs tile at 2,1)
+let list = buildDisplayList(api, st, env); const logTile = api.kijo_sel_x() + ',' + api.kijo_sel_y();
+const surfs = new Set(list.cmds.filter(k => k.op === 'text' && k.surf).map(k => k.surf)); assert.ok(surfs.has(19), 'logs tile text carries its surface id: ' + [...surfs]);
+st.sel = { surf: 19, all: true, key: 'x' }; list = buildDisplayList(api, st, { ...env, anim: new Anim() });
+assert.ok(!/LOGS/.test(list.selectionText), 'tile header is chrome, not content'); assert.match(list.selectionText, /first entry/); assert.match(list.selectionText, /WARN\s+disk almost full/, 'level tag and body are copied as text');
+assert.ok(list.cmds.some(k => k.op === 'fill' && Math.abs(k.c[3] - 0.38) < 1e-6), 'a highlight is drawn under the selection');
+st.sel = null; list = buildDisplayList(api, st, { ...env, anim: new Anim() }); assert.equal(list.selectionText, '');
+console.log('PASS — text selection: reading order, column gaps, partial lines, both directions, surfaces isolated, real tiles copy as text');

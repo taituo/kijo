@@ -10,7 +10,7 @@
     "build": "sh build.sh",
     "start": "node src/host.mjs",
     "overview": "node src/host.mjs --view overview --once",
-    "test": "node test/test.mjs && node test/telemetry.mjs && node test/draw.mjs && node test/daemon.mjs",
+    "test": "node test/test.mjs && node test/telemetry.mjs && node test/draw.mjs && node test/textsel.mjs && node test/daemon.mjs",
     "kijod": "node src/kijod.mjs",
     "serve": "node src/serve.mjs",
     "bundle": "node src/bundle.mjs",
