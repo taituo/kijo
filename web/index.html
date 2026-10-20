@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kijo</title>
+<style>
+  :root { color-scheme: dark light; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0e0e0d; }
+  @media (prefers-color-scheme: light) { html, body { background: #f1efea; } }
+  canvas { display: block; width: 100vw; height: 100vh; outline: none; touch-action: none; }
+</style>
+</head>
+<body>
+<!-- The only element. Everything inside is drawn from the WASM scene. -->
+<canvas id="kijo" tabindex="0" aria-label="Kijo spatial scene. Keys 1-4 switch views, arrows move, enter zooms."></canvas>
+<script type="module" src="./main.mjs"></script>
+</body>
+</html>

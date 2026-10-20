@@ -1,13 +1,19 @@
 {
-  "name": "kijo-wasm-spatial-core",
-  "version": "0.2.0",
+  "name": "kijo-spatial-core",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
-  "engines": {"node": ">=22"},
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "sh build.sh",
     "start": "node src/host.mjs",
     "overview": "node src/host.mjs --view overview --once",
-    "test": "node --test test/test.mjs"
+    "test": "node --test test/test.mjs",
+    "serve": "node src/serve.mjs",
+    "bundle": "node src/bundle.mjs",
+    "web": "node src/serve.mjs",
+    "e2e": "node test/e2e.mjs"
   }
 }

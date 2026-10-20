@@ -3,7 +3,7 @@ set -eu
 cd "$(dirname "$0")"
 clang --target=wasm32 -O2 -nostdlib \
   -Wl,--no-entry -Wl,--export-memory \
-  -Wl,--initial-memory=131072 -Wl,--max-memory=131072 \
+  -Wl,--initial-memory=196608 -Wl,--max-memory=196608 \
   -Wl,--strip-all \
   core/scene.c -o core/scene.wasm
 base64 < core/scene.wasm | tr -d '\n' > core/scene.wasm.b64
