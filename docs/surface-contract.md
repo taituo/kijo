@@ -63,7 +63,7 @@ A surface never moves layout focus on its own. Status it wants shown goes throug
 - Text ops with `term: true` keep columns exactly (adjacent runs join without a space, gaps become that many spaces);
   other text caps a gap at 8 spaces so layout whitespace does not leak into a paste.
 - Copy writes `selectionText`, computed from the same ops that were drawn, so what you copy is what you saw.
-  (The glyph atlas is ASCII today; box drawing folds to ASCII *before* drawing, so copy matches the screen.)
+  (The glyph atlas draws Latin/Greek/Cyrillic, symbols and box drawing; code points it cannot draw become `?` *before* drawing, so copy matches the screen.)
 - Paste into a captured surface is the surface's business (bracketed paste for a terminal). Paste into an uncaptured
   page is telemetry injection, and the two must never both fire.
 - **Accessibility:** `selectionText` is the seed of an a11y mirror. A DOM mirror of the text model, kept offscreen and

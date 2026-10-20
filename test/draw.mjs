@@ -113,4 +113,12 @@ const cu = { view: 'focus', notes: {}, events: [], bindings: { ...DEFAULT_BINDIN
   assert.equal(formatLogLine({ ts: NOW, level: 'warn', body: 'x' }).slice(-7), ' WARN x'.padStart(7), 'copy format: clock, level column, body');
 }
 
-console.log('PASS — telemetry drawing: bounded ops, gaps, thresholds, logs/traces/sys, flow model, every view x workspace, status injection, bindings, log filter/scroll');
+// ---- text is drawn as typed: Nordic letters, Greek, Cyrillic, arrows and box drawing pass; emoji and CJK (no wide cells) become '?'
+{
+  const { glyphOk, drawable } = await import('../web/fonts.mjs');
+  assert.equal(drawable('Hyv\u00e4\u00e4 y\u00f6t\u00e4 \u00c4\u00d6\u00c5 \u03bb \u0436 \u2192 \u2514\u2500 \u20ac \u2713'), 'Hyv\u00e4\u00e4 y\u00f6t\u00e4 \u00c4\u00d6\u00c5 \u03bb \u0436 \u2192 \u2514\u2500 \u20ac \u2713');
+  assert.equal(drawable('a\u{1F600}b\u4e2d'), 'a?b?', 'emoji and CJK are honest placeholders, one ? per code point');
+  assert.equal(glyphOk(0x7f), false); assert.equal(glyphOk(0x0a), false, 'controls never reach the atlas');
+}
+
+console.log('PASS — telemetry drawing: bounded ops, gaps, thresholds, logs/traces/sys, flow model, every view x workspace, status injection, bindings, log filter/scroll, Unicode text');

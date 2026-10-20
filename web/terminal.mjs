@@ -1,3 +1,4 @@
+import { drawable } from './fonts.mjs';
 // Terminal surface: draws a VT cell grid (src/vt.mjs) through the same text/fill ops as everything
 // else, so terminal output is selectable and copyable through the semantic text model (web/textsel.mjs)
 // exactly like a note or a log. Names are prefixed tm* because the bundler shares one scope.
@@ -15,9 +16,7 @@ function tmColor(v, light) {
   const g = (8 + (v - 232) * 10) / 255; return [g, g, g, 1];
 }
 
-// The glyph atlas is ASCII; box drawing and a few common symbols fold to ASCII so tables and prompts stay legible.
-const TM_FOLD = { '─': '-', '━': '-', '│': '|', '┃': '|', '┌': '+', '┐': '+', '└': '+', '┘': '+', '├': '+', '┤': '+', '┬': '+', '┴': '+', '┼': '+', '╭': '+', '╮': '+', '╯': '+', '╰': '+', '═': '=', '║': '|', '█': '#', '▀': '=', '▄': '=', '•': '*', '·': '.', '…': '.', ' ': ' ', '→': '>', '←': '<', '↑': '^', '↓': 'v', '✓': 'v', '✗': 'x' };
-const tmAscii = ch => (ch.length === 1 && ch >= ' ' && ch <= '~' ? ch : TM_FOLD[ch] ?? '?');
+const tmGlyph = ch => (ch >= ' ' && ch <= '~' ? ch : drawable(ch));
 
 const TM_FONT = 13, TM_LH = 17;
 
@@ -48,7 +47,7 @@ export function drawTerm(c, measure, T, r, term, { captured = false } = {}) {
   }
   // pass 2: glyphs (and underline), tagged by the caller's surface so selection and copy work
   for (const u of runs) {
-    let str = ''; for (let i = u.j; i < u.k; i++) str += tmAscii(u.row[i].ch);
+    let str = ''; for (let i = u.j; i < u.k; i++) str += tmGlyph(u.row[i].ch);
     if (!u.bg) str = str.replace(/\s+$/, ''); if (!str.trim() && !u.bg) continue;
     const fg = u.fl & 2 ? [u.fg[0], u.fg[1], u.fg[2], (u.fg[3] ?? 1) * 0.6] : u.fg;
     if (str.trim()) c.text(u.x, u.y + 1, str, TM_FONT, fg, { f: 'mono', w: u.fl & 1 ? 700 : 400, term: true });

@@ -9,6 +9,7 @@ import { NODE, FLAG, STATUS, BLOCKED_KIND, APP, SCALE, EVENT, getScene, getTiles
 import { drawChart, drawSpark, drawLogs, drawTraces, drawSys, drawFlow, surfaceModel, fmtVal, windowLabel, shortName } from './telemetry-draw.mjs';
 import { baseName } from '../src/telemetry.mjs';
 import { selection } from './textsel.mjs';
+import { drawable } from './fonts.mjs';
 import { drawTerm } from './terminal.mjs';
 
 const rgb = h => [parseInt(h.slice(1, 3), 16) / 255, parseInt(h.slice(3, 5), 16) / 255, parseInt(h.slice(5, 7), 16) / 255, 1];
@@ -74,7 +75,7 @@ export function buildDisplayList(api, st, env) {
       dash: (x, y, w, h, c, t = 1, d = 8, r = 0) => cmds.push({ op: 'dash', x, y, w, h, c: A(c, al), t, d, r }),
       heat: (x, y, w, h, act = 1) => cmds.push({ op: 'heat', x, y, w, h, activity: act * al }),
       text(x, y, str, size, c, { f = 'mono', w = 400, max = Infinity, term = false } = {}) {
-        str = String(str).replace(/[^\x20-\x7e]/g, '?');
+        str = drawable(str);
         if (measure(str, size, f, w) > max) {
           let lo = 0, hi = str.length;
           while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (measure(str.slice(0, mid) + '..', size, f, w) <= max) lo = mid; else hi = mid - 1; }

@@ -42,7 +42,7 @@ st.sel = null; list = buildDisplayList(api, st, { ...env, anim: new Anim() }); a
 {
   api.kijo_reset(); api.kijo_dispatch(2, 0, 0); // workspace 1 holds the shell tile (id 1) at 2,2
   const vt = new VT({ cols: 40, rows: 8 });
-  vt.write('\x1b[1;32muser@kijo\x1b[0m:~$ ls\r\n\x1b[34mdocs\x1b[0m   README.md   \x1b[7mtotal\x1b[0m 3\r\ncol1' + ' '.repeat(14) + 'col2\r\n┌─┐ box');
+  vt.write('\x1b[1;32muser@kijo\x1b[0m:~$ ls\r\n\x1b[34mdocs\x1b[0m   README.md   \x1b[7mtotal\x1b[0m 3\r\ncol1' + ' '.repeat(14) + 'col2\r\n┌─┐ box \u00e4\u00f6\u00e5 \u{1F600} \u4e2d');
   const tm = { tile: 1, id: 7, view: 0, exited: null, vt };
   const tst = { ...st, terms: new Map([[1, tm]]), capture: 1, sel: null }; api.kijo_select(2, 2);
   let tl = buildDisplayList(api, tst, { ...env, anim: new Anim(), dt: Infinity });
@@ -54,7 +54,7 @@ st.sel = null; list = buildDisplayList(api, st, { ...env, anim: new Anim() }); a
   const lines = tl.selectionText.split('\n');
   assert.equal(lines[0], 'user@kijo:~$ ls'); assert.equal(lines[1], 'docs   README.md   total 3', 'column gaps survive copy');
   assert.equal(lines[2], 'col1' + ' '.repeat(14) + 'col2', 'wide gaps are not capped for terminal text');
-  assert.equal(lines[3], '+-+ box', 'box drawing folds to ASCII in copy as on screen');
+  assert.equal(lines[3], '\u250c\u2500\u2510 box \u00e4\u00f6\u00e5 ? ?', 'box drawing and Nordic letters are drawn and copied as themselves; emoji and CJK (no wide cells yet) show as ?');
   assert.ok(tl.cmds.some(k => k.op === 'fill' && k.c[0] === T.blue[0] && k.c[2] === T.blue[2] && k.h === 17), 'captured cursor block is drawn');
   const exited = { ...tm, exited: 0 }; const tl2 = buildDisplayList(api, { ...tst, terms: new Map([[1, exited]]), capture: null, sel: null }, { ...env, anim: new Anim(), dt: Infinity });
   assert.ok(tl2.cmds.some(k => k.op === 'text' && k.str === 'exited 0'), 'header says when the shell has exited');

@@ -4,12 +4,13 @@
 //                          a viewport per WORKING tile (shader_id 1 from WASM)
 // The heatmap is monochrome by design; theme tint comes from blend constants.
 const FLOATS = 16; // rect4 color4 uv4 params4
-import { FONTS } from './fonts.mjs';
+import { FONTS, glyphOk } from './fonts.mjs';
 import { buildSurface } from './surface3d.mjs';
-const FIRST = 32, LAST = 126, ATLAS_W = 2048;
+const ATLAS_W = 2048;
 
-// Glyph atlas: one entry per (font, device-pixel size), with the real advance of every glyph so
-// proportional text lays out exactly the same in the display list and on the GPU.
+// Glyph atlas: one entry per (font, device-pixel size, weight). Glyphs are added on demand (any code point glyphOk() allows), each with
+// its real advance, so proportional text lays out exactly the same in the display list and on the GPU. Adding a glyph re-lays-out and
+// re-rasterises the atlas, which is cheap (a few hundred glyphs) and happens once per new character, before the frame's instances are built.
 class GlyphAtlas {
   constructor() { this.sizes = new Map(); this.dirty = true; this.height = 1; this.canvas = new OffscreenCanvas(ATLAS_W, 1); }
   font(e) { return `${e.weight} ${e.px}px ${FONTS[e.font]}`; }
@@ -17,18 +18,27 @@ class GlyphAtlas {
     const key = `${font}/${px}/${weight}`;
     let e = this.sizes.get(key);
     if (e) return e;
-    e = { key, px, font, weight, widths: [] };
+    e = { key, px, font, weight, idx: new Map(), cps: [], widths: [], cw: 0, ch: Math.ceil(px * 1.4) + 2, cols: 1, y: 0 };
+    this.sizes.set(key, e);
     const ctx = this.canvas.getContext('2d'); ctx.font = this.font(e);
-    let max = 0;
-    for (let c = FIRST; c <= LAST; c++) { const w = ctx.measureText(String.fromCharCode(c)).width; e.widths.push(w); max = Math.max(max, w); }
-    e.cw = Math.ceil(max) + 2; e.ch = Math.ceil(px * 1.4) + 2;
-    this.sizes.set(key, e); this.layout(); return e;
+    for (let c = 0x20; c <= 0x7e; c++) this.add(e, c, ctx);
+    for (const ch of '\u00e4\u00f6\u00e5\u00c4\u00d6\u00c5\u00e9\u00fc\u00df\u2500\u2502\u2588') this.add(e, ch.codePointAt(0), ctx); // common ones up front: no first-use hitch
+    this.layout(); return e;
   }
+  add(e, cp, ctx) {
+    if (e.idx.has(cp)) return false;
+    if (!ctx) { ctx = this.canvas.getContext('2d'); ctx.font = this.font(e); }
+    const w = ctx.measureText(String.fromCodePoint(cp)).width;
+    e.idx.set(cp, e.cps.length); e.cps.push(cp); e.widths.push(w);
+    e.cw = Math.max(e.cw, Math.ceil(w) + 2);
+    return true;
+  }
+  ensure(e, str) { let n = false; for (const ch of str) { const cp = ch.codePointAt(0); if (glyphOk(cp) && this.add(e, cp)) n = true; } if (n) this.layout(); }
   layout() {
     let y = 0;
     for (const e of this.sizes.values()) {
-      e.cols = Math.floor(ATLAS_W / e.cw); e.y = y;
-      y += Math.ceil((LAST - FIRST + 1) / e.cols) * e.ch;
+      e.cols = Math.max(1, Math.floor(ATLAS_W / e.cw)); e.y = y;
+      y += Math.ceil(e.cps.length / e.cols) * e.ch;
     }
     this.height = Math.max(1, y); this.dirty = true;
   }
@@ -38,15 +48,18 @@ class GlyphAtlas {
     ctx.fillStyle = '#fff'; ctx.textBaseline = 'top';
     for (const e of this.sizes.values()) {
       ctx.font = this.font(e);
-      for (let c = FIRST; c <= LAST; c++) {
-        const i = c - FIRST, gx = (i % e.cols) * e.cw + 1, gy = e.y + Math.floor(i / e.cols) * e.ch + 1;
-        ctx.fillText(String.fromCharCode(c), gx, gy + Math.round(e.px * 0.12));
-      }
+      e.cps.forEach((cp, i) => {
+        const gx = (i % e.cols) * e.cw + 1, gy = e.y + Math.floor(i / e.cols) * e.ch + 1;
+        ctx.fillText(String.fromCodePoint(cp), gx, gy + Math.round(e.px * 0.12));
+      });
     }
     this.dirty = false;
   }
   glyph(e, ch) {
-    const i = Math.min(LAST, Math.max(FIRST, ch.charCodeAt(0))) - FIRST;
+    let cp = ch.codePointAt(0);
+    if (!glyphOk(cp)) cp = 63;
+    if (!e.idx.has(cp)) this.ensure(e, String.fromCodePoint(cp));
+    const i = e.idx.get(cp);
     return { u: (i % e.cols) * e.cw, v: e.y + Math.floor(i / e.cols) * e.ch, adv: e.widths[i] };
   }
 }
@@ -145,6 +158,7 @@ export async function createGpuRenderer(canvas, { sceneWGSL, heatWGSL, surfaceWG
       };
       const R = v => Math.round(v * dpr);
       const s3Geo = []; let s3Bytes = 0;
+      for (const k of cmds) if (k.op === 'text') atlas.ensure(atlas.entry(Math.round(k.s * dpr), k.f || 'mono', k.w || 400), k.str); // register new glyphs first: layout settles before any uv is taken
       for (const k of cmds) {
         const r = Math.round((k.r || 0) * dpr), box = [R(k.x), R(k.y), R(k.x + k.w) - R(k.x), R(k.y + k.h) - R(k.y)];
         if (k.op === 'fill') push(...box, k.c, 0, 0, 0, undefined, r);

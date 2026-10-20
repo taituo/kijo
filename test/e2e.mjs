@@ -20,8 +20,8 @@ await page.keyboard.press('ArrowLeft'); assert.deepEqual((await sel()).slice(0, 
 await page.keyboard.press('ArrowUp'); await page.keyboard.press('n');             // promote ghost at (1,1)
 assert.equal(await q(() => __kijo.api.kijo_node_count() > 0), true);
 assert.equal(await q(() => Object.keys(__kijo.st.notes).includes('100')), true, 'note created by promoting a ghost');
-await page.keyboard.press('e'); await page.keyboard.type('Hello board'); await page.keyboard.press('Enter'); await page.keyboard.type('line two'); await page.keyboard.press('Escape');
-assert.equal(await q(() => __kijo.st.notes[100]), 'Hello board\nline two');
+await page.keyboard.press('e'); await page.keyboard.type('Hello board'); await page.keyboard.press('Enter'); await page.keyboard.type('line two '); for (const ch of '\u00e4\u00f6\u00e5\u00c4\u00d6\u00c5') await page.evaluate(k => dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true })), ch); await page.keyboard.press('Escape'); // (ä etc.: keydown with key='ä', as a Finnish keyboard sends it)
+assert.equal(await q(() => __kijo.st.notes[100]), 'Hello board\nline two \u00e4\u00f6\u00e5\u00c4\u00d6\u00c5');
 // workspaces via Alt+digit and clicks on the bar pills
 await page.keyboard.press('Alt+Digit2'); assert.equal((await sel())[2], 1);
 await page.mouse.click(67, 19); assert.equal((await sel())[2], 0, 'clicking pill 1 switches workspace');
@@ -38,7 +38,7 @@ assert.equal(await q(() => __kijo.api.kijo_ws()), 0);
 await page.reload(); await page.waitForFunction(() => globalThis.__kijo?.frames > 5);
 assert.equal(await q(() => __kijo.st.notes[100]), undefined, 'fresh param ignores saved state');
 await page.goto('' + BUNDLE + '?renderer=2d'); await page.waitForFunction(() => globalThis.__kijo?.frames > 5);
-assert.equal(await q(() => __kijo.st.notes[100]), 'Hello board\nline two', 'notes persisted in localStorage');
+assert.equal(await q(() => __kijo.st.notes[100]), 'Hello board\nline two \u00e4\u00f6\u00e5\u00c4\u00d6\u00c5', 'notes persisted in localStorage');
 assert.equal(await q(() => [...document.querySelectorAll('body > *')].filter(e => e.tagName !== 'SCRIPT').map(e => e.tagName).join()), 'CANVAS', 'DOM contains only the canvas');
 
 // ---- telemetry: the browser alone is a complete runtime (no relay, nothing installed)

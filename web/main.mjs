@@ -228,7 +228,7 @@ async function boot() {
       if (ev.key === 'Escape') { st.notes[e.id] = e.text.trim() || `Note ${e.id}`; log(`Edited note #${e.id}`); st.editing = null; save(); }
       else if (ev.key === 'Enter') e.text += '\n';
       else if (ev.key === 'Backspace') e.text = e.text.slice(0, -1);
-      else if (ev.key.length === 1 && /[\x20-\x7e]/.test(ev.key) && e.text.length < 600) e.text += ev.key;
+      else if ([...ev.key].length === 1 && /^[\p{L}\p{M}\p{N}\p{P}\p{S}\p{Zs}]$/u.test(ev.key) && e.text.length < 600) e.text += ev.key;
       return true;
     }
     { // log tile: find, scroll. Filter syntax is in telemetry-draw.mjs (parseLogFilter).
