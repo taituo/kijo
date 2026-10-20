@@ -56,6 +56,14 @@ Message schema (all optional fields have defaults): `{t:'metric',name,value,ts?,
 **Dashboards are tiles.** Workspace 3 charts the page itself; workspace 4 shows a system card
 (neofetch facts + htop-style bars from `cpu.core_pct{core}`), charts, logs and a trace waterfall.
 Pin anything you injected: `/` then `Pin chart: <series>`, `Pin logs`, `Pin traces`, `Pin system`.
+**Grafana-style panels.** The same series can be pinned as a look: `Pin stat: <series>` (big value with a
+sparkline), `Pin gauge: <series>` (half-ring), `Pin bars: <series>` (a bar gauge with one bar per label, e.g. one
+per core) and `Pin status: <series>` (**Up / Down**). Colours follow Grafana's defaults: green, yellow from 80,
+red from 95 for percent series; other units stay green because a threshold would be invented. "Up" is not a
+claim about the service: it means a sample arrived within three and a half typical intervals (at least 5 s), and
+a Down panel says how long ago the last one came. `Panel look: <kind> (selected tile)` re-skins a pinned tile. The
+look is host state; the core still sees an ordinary chart tile, so the surface contract does not change.
+
 `[` `]` change the time window (1m / 5m / 15m / 30m). View `6` is **flow**: injectors → series → tiles,
 read from the live store; a moving packet on a cable means data really arrived on it in the last seconds.
 
@@ -199,6 +207,9 @@ limit is that glass shows the wallpaper, not other tiles behind it. Canvas2D get
   future adapter feeds. The bar and workspace pills surface the most urgent state per workspace.
 - **Views** (`1`-`6`): focus (2x2), overview (6x6 heatmap), wiring, timeline, workspaces, flow.
   `Esc`/`Enter` and the wheel zoom between them; tiles glide between rectangles.
+- **Square cells.** Focus and overview map the grid into the largest centred square, so a 1x1 tile is a square and a
+  2x2 footprint is a bigger square. `Z` zooms the selected tile to the whole area (a terminal or a wide chart); `Esc` or `Z` goes back,
+  arrows pick the next tile. Phones always show the selected tile full size.
 - **Search** (`/` or `Ctrl+K`): one palette over commands, workspaces and every note/tile.
 - **Notes**: `N` makes a note, `F` reserves a 2x2 footprint, `E` writes text (`Esc` saves).
 

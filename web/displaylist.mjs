@@ -6,7 +6,7 @@
 // zone, workspace pills with attention marks, proportional type for titles, mono for data,
 // tokens for radius/gap so theming later changes values, not code.
 import { NODE, FLAG, STATUS, BLOCKED_KIND, APP, SCALE, EVENT, getScene, getTiles, getEvents, label, tag, selectedTile } from '../src/core.mjs';
-import { drawChart, drawSpark, drawLogs, drawTraces, drawSys, drawFlow, surfaceModel, fmtVal, windowLabel, shortName } from './telemetry-draw.mjs';
+import { drawStat, drawGauge, drawBars, drawStatus, drawChart, drawSpark, drawLogs, drawTraces, drawSys, drawFlow, surfaceModel, fmtVal, windowLabel, shortName } from './telemetry-draw.mjs';
 import { baseName } from '../src/telemetry.mjs';
 import { selection } from './textsel.mjs';
 import { drawable } from './fonts.mjs';
@@ -16,9 +16,9 @@ const rgb = h => [parseInt(h.slice(1, 3), 16) / 255, parseInt(h.slice(3, 5), 16)
 const base = { radius: 6, gap: 10, bar: 38, hint: 28 };
 export const THEMES = {
   dark: { ...base, name: 'dark', bg: rgb('#0e0e0d'), barBg: rgb('#141413'), panel: rgb('#171715'), raised: rgb('#1e1e1c'), ink: rgb('#ebe8e2'), dim: rgb('#8a8780'),
-    faint: rgb('#2a2a27'), line: rgb('#46453f'), red: rgb('#e5513c'), yellow: rgb('#f2c21b'), blue: rgb('#4b7bff'), onAccent: rgb('#0e0e0d'), scrim: [0, 0, 0, 0.6] },
+    faint: rgb('#2a2a27'), line: rgb('#46453f'), green: rgb('#5fbf6a'), red: rgb('#e5513c'), yellow: rgb('#f2c21b'), blue: rgb('#4b7bff'), onAccent: rgb('#0e0e0d'), scrim: [0, 0, 0, 0.6] },
   light: { ...base, name: 'light', bg: rgb('#f1efea'), barBg: rgb('#e9e6df'), panel: rgb('#fbfaf7'), raised: rgb('#ffffff'), ink: rgb('#141413'), dim: rgb('#6d6a64'),
-    faint: rgb('#dcd9d2'), line: rgb('#a8a59d'), red: rgb('#c4321f'), yellow: rgb('#e0ad00'), blue: rgb('#2350d4'), onAccent: rgb('#fbfaf7'), scrim: [0.1, 0.1, 0.09, 0.45] },
+    faint: rgb('#dcd9d2'), line: rgb('#a8a59d'), green: rgb('#1f8a3a'), red: rgb('#c4321f'), yellow: rgb('#e0ad00'), blue: rgb('#2350d4'), onAccent: rgb('#fbfaf7'), scrim: [0.1, 0.1, 0.09, 0.45] },
 };
 export const WALLPAPERS = [{ name: 'aurora', hue: 0, seed: 0 }, { name: 'saffron', hue: 2.5, seed: 1 }, { name: 'lagoon', hue: -1.2, seed: 2 }, { name: 'orchid', hue: 0.9, seed: 3 }, { name: 'meadow', hue: -2.3, seed: 4 }];
 const white = [1, 1, 1, 1];
@@ -26,7 +26,7 @@ const white = [1, 1, 1, 1];
 // names as the other themes; panel/raised are markers that the helpers turn into glass.
 THEMES.glass = { ...base, name: 'glass', glass: true, radius: 16, gap: 14, bar: 46, wall: { hue: 0, seed: 0 },
   bg: rgb('#0a0c24'), barBg: white, panel: white, raised: [1, 1, 1, 1], ink: [1, 1, 1, 1], dim: [1, 1, 1, 0.66], faint: [1, 1, 1, 0.16], line: [1, 1, 1, 0.40],
-  red: rgb('#ff6b5e'), yellow: rgb('#ffd25a'), blue: rgb('#7db2ff'), onAccent: rgb('#0b1030'), scrim: [0.02, 0.02, 0.08, 0.45] };
+  green: rgb('#7ee0a0'), red: rgb('#ff6b5e'), yellow: rgb('#ffd25a'), blue: rgb('#7db2ff'), onAccent: rgb('#0b1030'), scrim: [0.02, 0.02, 0.08, 0.45] };
 export const A = (c, a) => (a === 1 ? c : [c[0], c[1], c[2], (c[3] ?? 1) * a]);
 export const statusColor = (T, s) => [T.dim, T.blue, T.yellow, T.red, T.ink][s] ?? T.dim;
 const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, 1];
@@ -116,6 +116,8 @@ export function buildDisplayList(api, st, env) {
     return m;
   };
   const keysFor = id => [].concat(bindings[id] ?? []).flatMap(b => !store ? [] : store.series.has(b) ? [b] : [...store.series.keys()].filter(k => baseName(k) === b).slice(0, 1));
+  // A bar gauge shows every series of the bound base name (one bar per core), not just the first.
+  const barKeys = id => [].concat(bindings[id] ?? []).flatMap(b => !store ? [] : store.series.has(b) ? [b] : [...store.series.keys()].filter(k => baseName(k) === b).sort());
   const cur = api.kijo_special_open() ? -1 : api.kijo_ws();
   const wsIndex = api.kijo_special_open() ? 9 : api.kijo_ws();
   const sel = selectedTile(api);
@@ -304,7 +306,7 @@ export function buildDisplayList(api, st, env) {
           else if (t.app === APP.SERIES) {
             const ks = keysFor(t.id);
             if (!ks.length) { c.text(cr.x, cr.y, 'unbound chart', 13, fg, { f: 'sans', w: 500 }); c.text(cr.x, cr.y + 22, 'press / and choose "Pin chart: <series>"', 12, sub, { max: bw }); c.text(cr.x, cr.y + 42, 'or inject:  queue.depth 12', 12, sub, { max: bw }); }
-            else drawChart(c, measure, T, cr, store, ks, winMs, now, { mini: false });
+            else { const vz = st.viz?.[t.id]; if (vz === 'stat') drawStat(c, measure, T, cr, store, ks, winMs, now); else if (vz === 'gauge') drawGauge(c, measure, T, cr, store, ks, winMs, now); else if (vz === 'status') drawStatus(c, measure, T, cr, store, ks, winMs, now); else if (vz === 'bars') drawBars(c, measure, T, cr, store, barKeys(t.id), winMs, now); else drawChart(c, measure, T, cr, store, ks, winMs, now, { mini: false }); }
           } else if (t.app === APP.LOGS) { const lv = st.logv?.[t.id] || {}; logInfo[t.id] = drawLogs(c, measure, T, cr, store, now, { off: lv.off, q: lv.q }); }
           else if (t.app === APP.TRACES) drawTraces(c, measure, T, cr, store, now);
           else drawSys(c, measure, T, cr, store, now, { windowMs: winMs });

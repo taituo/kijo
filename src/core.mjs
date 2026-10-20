@@ -143,7 +143,7 @@ export function handleKeyName(api, ui, key) {
   else if (key === 's') dispatch(api, 'TOGGLESPECIAL');
   else if (key === 'm') { const to = (api.kijo_ws() + 1) % 9; if (dispatch(api, 'MOVETOWORKSPACE', to)) log(`Moved tile #${t.id} to workspace ${to + 1}`); }
   else if (key === 'g') ui.ghosts = !ui.ghosts;
-  else if (key === 'r') { api.kijo_reset(); ui.notes = { ...DEFAULT_NOTES }; ui.bindings = { ...DEFAULT_BINDINGS }; log('Reset'); }
+  else if (key === 'r') { api.kijo_reset(); ui.notes = { ...DEFAULT_NOTES }; ui.bindings = { ...DEFAULT_BINDINGS }; ui.viz = {}; log('Reset'); }
   else if (key === 'n') {
     const id = t.kind === KIND.GHOST ? api.kijo_promote_ghost(api.kijo_sel_x(), api.kijo_sel_y()) : t.kind === KIND.EMPTY ? api.kijo_spawn(APP.NOTE, 1, 1, 0) : 0;
     if (id) { ui.notes[id] = `Note ${id}`; log(`New note #${id} at ${api.kijo_sel_x()},${api.kijo_sel_y()}`); }
@@ -152,7 +152,7 @@ export function handleKeyName(api, ui, key) {
       const id = api.kijo_spawn(APP.NOTE, 2, 2, corner);
       if (id) { ui.notes[id] = `Note ${id}`; log(`New 2x2 footprint note #${id}`); break; }
     }
-  } else if (key === 'x') { if (t.kind === KIND.REAL && dispatch(api, 'KILLACTIVE')) { log(`Closed tile #${t.id}; owned ghosts cleaned`); delete ui.notes[t.id]; delete ui.bindings[t.id]; } }
+  } else if (key === 'x') { if (t.kind === KIND.REAL && dispatch(api, 'KILLACTIVE')) { log(`Closed tile #${t.id}; owned ghosts cleaned`); delete ui.notes[t.id]; delete ui.bindings[t.id]; if (ui.viz) delete ui.viz[t.id]; } }
   else if (key === 't') { if (t.kind === KIND.REAL) { api.kijo_report(t.id, (t.status + 1) % 5, 1, 40); log(`Demo status change for tile #${t.id}`); } }
   else return false;
   return true;

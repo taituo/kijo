@@ -350,3 +350,95 @@ export function drawFlow(c, g, measure, T, r, store, tiles, bindings, now, time,
   if (!model.sources.length) c.text(xs, top, 'nothing injected yet', 12, T.dim);
   return model;
 }
+
+// ------------------------------------------------------------------ Grafana-style panels
+// Stat, gauge, bar gauge and Up/Down status over the same store as the charts. They are *surfaces*:
+// the core still sees an ordinary SERIES tile, the host remembers which look it was pinned with.
+// Colour rule (same as Grafana's default thresholds): green, yellow from 80, red from 95 for percent
+// series; other units stay green because a threshold would be invented.
+export const PANEL_KINDS = ['chart', 'stat', 'gauge', 'bars', 'status'];
+export const panelColor = (T, v, unit) => (unit === '%' ? (v >= 95 ? T.red : v >= 80 ? T.yellow : T.green) : T.green);
+
+// Up when a sample arrived within three and a half typical intervals (never less than 5 s).
+export function seriesFreshness(store, key, now) {
+  const win = store.window(key, 600000, now); if (!win || win.to - win.from < 1) { const l = store.last(key); return { up: false, ageMs: l ? now - l.ts : null, intervalMs: 0 }; }
+  const sp = []; for (let i = Math.max(win.from + 1, win.to - 30); i < win.to; i++) sp.push(win.ts[i] - win.ts[i - 1]); sp.sort((a, b) => a - b);
+  const interval = sp[sp.length >> 1] || 0, ageMs = Math.max(0, now - win.ts[win.to - 1]);
+  return { up: ageMs <= Math.max(5000, interval * 3.5), ageMs, intervalMs: interval };
+}
+const tdAgo = ms => (ms == null ? 'never' : ms < 1500 ? 'just now' : ms < 90000 ? Math.round(ms / 1000) + 's ago' : Math.round(ms / 60000) + 'm ago');
+// Size a string so it fits `w` px: measure once at 100 px and scale (fonts scale linearly).
+// Whole pixels in steps of 4: every distinct size is its own glyph-atlas strip, so sizes must not vary per frame.
+const tdFit = (measure, s, w, hMax, weight = 700) => Math.max(12, Math.floor(tdClamp(Math.min(hMax, w / Math.max(1, measure(s, 100, 'sans', weight)) * 100), 12, 400) / 4) * 4);
+
+// Big value, threshold colour, sparkline underneath. keys[0] only.
+export function drawStat(c, measure, T, r, store, keys, windowMs, now) {
+  const { x, y, w, h } = r, key = keys[0], l = key && store.last(key);
+  if (!l) { c.text(x + w / 2 - measure('no data', 14, 'sans', 500) / 2, y + h / 2 - 8, 'no data', 14, T.dim, { f: 'sans', w: 500 }); return; }
+  const unit = store.series.get(key).unit, col = panelColor(T, l.v, unit), txt = fmtVal(l.v, unit), spark = h > 120;
+  const fs = tdFit(measure, txt, w * 0.9, (spark ? h * 0.5 : h * 0.7)), tw = measure(txt, fs, 'sans', 700);
+  c.text(x + (w - tw) / 2, y + (spark ? h * 0.12 : h * 0.18), txt, fs, col, { f: 'sans', w: 700 });
+  const nm = shortName(key), nw = measure(nm, 12);
+  c.text(x + (w - Math.min(nw, w)) / 2, y + h - (spark ? h * 0.36 : 18), nm, 12, T.dim, { max: w });
+  if (spark) { const sh = h * 0.26; drawChart(c, measure, T, { x, y: y + h - sh, w, h: sh }, store, [key], windowMs, now, { mini: true }); }
+}
+
+// Half-ring gauge, rasterised in columns (the ops are axis-aligned rectangles, so an arc is a column per pixel).
+export function drawGauge(c, measure, T, r, store, keys, windowMs, now) {
+  const { x, y, w, h } = r, key = keys[0], l = key && store.last(key);
+  if (!l) { c.text(x + w / 2 - measure('no data', 14, 'sans', 500) / 2, y + h / 2 - 8, 'no data', 14, T.dim, { f: 'sans', w: 500 }); return; }
+  const unit = store.series.get(key).unit;
+  let max = 100, min = 0;
+  if (unit !== '%') { const win = store.window(key, windowMs, now); let m = 0; for (let i = win.from; i < win.to; i++) if (win.v[i] > m) m = win.v[i]; max = tdNice(Math.max(m, l.v) * 1.15); }
+  const f = tdClamp((l.v - min) / (max - min), 0, 1), col = panelColor(T, l.v, unit);
+  const R = Math.max(20, Math.min(w / 2 - 4, h - 34)), th = Math.max(8, R * 0.2), cx = x + w / 2, cy = y + 4 + R, Ri = R - th;
+  const step = R > 110 ? 2 : 1, phi = Math.PI * (1 - f), tan = Math.tan(phi);
+  for (let dx = -Math.floor(R / step) * step; dx <= R; dx += step) {
+    const a = Math.abs(dx), yo = Math.sqrt(Math.max(0, R * R - a * a)), yi = a < Ri ? Math.sqrt(Ri * Ri - a * a) : 0;
+    if (yo - yi < 0.5) continue;
+    // value-angle ray splits the band: filled where the point's angle (from the left end) is >= phi
+    let lo, hi; // filled span in "up" coordinates inside [yi, yo]
+    if (f >= 1) { lo = yi; hi = yo; } else if (f <= 0) { lo = hi = yi; }
+    else if (dx > 0) { if (phi >= Math.PI / 2) lo = hi = yi; else { lo = tdClamp(dx * tan, yi, yo); hi = yo; } }
+    else if (dx < 0) { if (phi <= Math.PI / 2) { lo = yi; hi = yo; } else { lo = yi; hi = tdClamp(dx * tan, yi, yo); } }
+    else if (phi <= Math.PI / 2) { lo = yi; hi = yo; } else lo = hi = yi;
+    const px = Math.round(cx + dx);
+    if (hi > lo) c.fill(px, Math.round(cy - hi), step, Math.max(1, Math.round(hi - lo)), col);
+    if (lo - yi > 0.5) c.fill(px, Math.round(cy - lo), step, Math.max(1, Math.round(lo - yi)), T.faint);
+    if (yo - hi > 0.5) c.fill(px, Math.round(cy - yo), step, Math.max(1, Math.round(yo - hi)), T.faint);
+  }
+  const txt = fmtVal(l.v, unit), fs = tdFit(measure, txt, Ri * 1.5, Ri * 0.75);
+  c.text(cx - measure(txt, fs, 'sans', 700) / 2, cy - fs * 0.85, txt, fs, col, { f: 'sans', w: 700 });
+  c.text(cx - R, cy + 6, fmtVal(min, unit), 10, T.dim); const mx = fmtVal(max, unit); c.text(cx + R - measure(mx, 10), cy + 6, mx, 10, T.dim);
+  const nm = shortName(key); c.text(x + (w - Math.min(measure(nm, 12), w)) / 2, cy + 22, nm, 12, T.dim, { max: w });
+}
+
+// Bar gauge: one horizontal bar per series of a base name (cpu.core_pct -> one bar per core) or per bound key.
+export function drawBars(c, measure, T, r, store, keys, windowMs, now) {
+  const { x, y, w, h } = r;
+  if (!keys.length) { c.text(x, y, 'no series', 13, T.dim); return; }
+  const lbl = k => (k.match(/\{(.*)\}/)?.[1] || shortName(k)).replace(/"/g, '').replace(/^[a-z_]+=/, '');
+  const rows = keys.map(k => ({ k, l: store.last(k), unit: store.series.get(k)?.unit })).filter(q => q.l);
+  if (!rows.length) { c.text(x, y, 'no data', 13, T.dim); return; }
+  const pct = rows.every(q => q.unit === '%'); let max = 100;
+  if (!pct) max = tdNice(Math.max(...rows.map(q => q.l.v)) * 1.15);
+  const rowH = tdClamp(h / rows.length, 14, 30), n = Math.min(rows.length, Math.floor(h / rowH)), lw = Math.min(w * 0.25, Math.max(...rows.slice(0, n).map(q => measure(lbl(q.k), 11))) + 10);
+  for (let i = 0; i < n; i++) {
+    const q = rows[i], by = y + i * rowH, bh = Math.max(6, rowH - 6), vt = fmtVal(q.l.v, q.unit), vw = measure(vt, 11, 'mono', 600) + 8, bx = x + lw, bw = Math.max(20, w - lw - vw);
+    c.text(x, by + (bh - 11) / 2 + 1, lbl(q.k), 11, T.dim, { max: lw });
+    c.fill(bx, by, bw, bh, T.faint, 2); c.fill(bx, by, Math.max(1, bw * tdClamp(q.l.v / max, 0, 1)), bh, panelColor(T, q.l.v, q.unit), 2);
+    c.text(bx + bw + 8, by + (bh - 11) / 2 + 1, vt, 11, T.ink, { w: 600 });
+  }
+  if (n < rows.length) c.text(x, y + h - 12, `+${rows.length - n} more (zoom with Z)`, 10, T.dim);
+}
+
+// Up / Down from data freshness, the honest version of Grafana's up panels.
+export function drawStatus(c, measure, T, r, store, keys, windowMs, now) {
+  const { x, y, w, h } = r, key = keys[0];
+  if (!key || !store.series.has(key)) { c.text(x + w / 2 - measure('unbound', 14, 'sans', 500) / 2, y + h / 2 - 8, 'unbound', 14, T.dim, { f: 'sans', w: 500 }); return; }
+  const fr = seriesFreshness(store, key, now), txt = fr.up ? 'Up' : 'Down', col = fr.up ? T.green : T.red, fs = tdFit(measure, txt, w * 0.8, h * 0.42);
+  c.fill(x, y, w, h, tdAlpha(col, 0.16), 6);
+  c.text(x + (w - measure(txt, fs, 'sans', 700)) / 2, y + h * 0.2, txt, fs, col, { f: 'sans', w: 700 });
+  const sub = `${shortName(key)} - ${fr.ageMs == null ? 'never seen' : 'last sample ' + tdAgo(fr.ageMs)}`;
+  c.text(x + (w - Math.min(measure(sub, 11), w - 8)) / 2, y + h - 22, sub, 11, T.dim, { max: w - 8 });
+}

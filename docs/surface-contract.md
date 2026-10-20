@@ -41,6 +41,10 @@ A new kind of surface adds an op or composes existing ones. It does not add a co
 **Capability and fallback:** every op has a defined degraded form (glass -> tinted fill, scene3d -> painter's algorithm).
 A renderer states what it supports; a surface that needs something unsupported draws a labelled placeholder, never nothing.
 
+A tile may also carry a **look** chosen by the host (a chart pinned as stat, gauge, bar gauge or Up/Down status). The look
+lives beside the tile's binding in host state, never in the core, which is the contract's rule applied to itself.
+Layout uses square cells: the host maps the core's scene into the largest centred square, and a zoom (`Z`) is a host mapping, not a core state.
+
 ## 4. Input routing and focus
 
 Focus has two levels and only one of them is a surface's business.

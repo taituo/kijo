@@ -121,4 +121,33 @@ const cu = { view: 'focus', notes: {}, events: [], bindings: { ...DEFAULT_BINDIN
   assert.equal(glyphOk(0x7f), false); assert.equal(glyphOk(0x0a), false, 'controls never reach the atlas');
 }
 
+// ---- Grafana-style panels: stat, gauge, bars, Up/Down over the same store, bounded, inside their rectangle, honest about staleness
+{
+  const { drawStat, drawGauge, drawBars, drawStatus, seriesFreshness, panelColor, PANEL_KINDS } = await import('../web/telemetry-draw.mjs');
+  const P = THEMES.dark, R = { x: 100, y: 50, w: 300, h: 260 }, inside = (ops, r) => { for (const o of ops.filter(o => o.op === 'fill')) assert.ok(o.x >= r.x - 2 && o.x + o.w <= r.x + r.w + 2 && o.y >= r.y - 2 && o.y + o.h <= r.y + r.h + 2, 'panel fill inside its rect: ' + JSON.stringify(o)); };
+  assert.deepEqual(PANEL_KINDS, ['chart', 'stat', 'gauge', 'bars', 'status']);
+  assert.equal(panelColor(P, 50, '%'), P.green); assert.equal(panelColor(P, 85, '%'), P.yellow); assert.equal(panelColor(P, 97, '%'), P.red); assert.equal(panelColor(P, 999, 'ms'), P.green, 'no invented thresholds for other units');
+  const ps = new Store(); for (let i = 0; i < 120; i++) { ps.push('mem.used_pct', 20 + i * 0.5, NOW - (120 - i) * 1000, { unit: '%' }); ps.push('old.beat', 1, NOW - 300_000 - (120 - i) * 1000); for (let k = 0; k < 4; k++) ps.push('cpu.core_pct', 10 + k * 25, NOW - (120 - i) * 1000, { unit: '%', labels: { core: String(k) } }); }
+  const a = rec(); drawStat(a, measure, P, R, ps, ['mem.used_pct'], 300000, NOW); assert.ok(a.ops.some(o => o.str === '79.5%'), 'stat shows the latest value'); inside(a.ops, R);
+  const gg = rec(); drawGauge(gg, measure, P, R, ps, ['mem.used_pct'], 300000, NOW); inside(gg.ops, R); assert.ok(gg.ops.length > 40 && gg.ops.length < 700, 'gauge ops follow the radius: ' + gg.ops.length);
+  const lit = gg.ops.filter(o => o.op === 'fill' && o.c === P.green).length, track = gg.ops.filter(o => o.op === 'fill' && o.c === P.faint).length; assert.ok(lit > 0 && track > 0, 'a part-filled gauge has both a value arc and a track');
+  const g0 = rec(); const e = new Store(); e.push('z', 0, NOW, { unit: '%' }); drawGauge(g0, measure, P, R, e, ['z'], 300000, NOW); assert.equal(g0.ops.filter(o => o.op === 'fill' && o.c === P.green).length, 0, '0% draws no value arc');
+  const g1 = rec(); const f1 = new Store(); f1.push('z', 100, NOW, { unit: '%' }); drawGauge(g1, measure, P, R, f1, ['z'], 300000, NOW); assert.equal(g1.ops.filter(o => o.op === 'fill' && o.c === P.faint).length, 0, '100% leaves no track');
+  const ks = [...ps.series.keys()].filter(k => k.startsWith('cpu.core_pct{')).sort(); const b = rec(); drawBars(b, measure, P, R, ps, ks, 300000, NOW); inside(b.ops, R);
+  assert.equal(b.ops.filter(o => o.op === 'text' && /%$/.test(o.str)).length, 4, 'one bar and value per core');
+  assert.ok(seriesFreshness(ps, 'mem.used_pct', NOW).up, 'recent samples: up'); assert.ok(!seriesFreshness(ps, 'old.beat', NOW).up, 'five minutes of silence: down'); assert.equal(seriesFreshness(ps, 'nope', NOW).ageMs, null);
+  const u = rec(); drawStatus(u, measure, P, R, ps, ['mem.used_pct'], 300000, NOW); assert.ok(u.ops.some(o => o.str === 'Up')); const d = rec(); drawStatus(d, measure, P, R, ps, ['old.beat'], 300000, NOW); assert.ok(d.ops.some(o => o.str === 'Down') && d.ops.some(o => /last sample 5m ago/.test(o.str)), 'down says how long ago');
+  for (const f of [drawStat, drawGauge, drawStatus]) { const r = rec(); f(r, measure, P, R, ps, [], 300000, NOW); assert.ok(r.ops.length <= 2, 'unbound panels draw a label, not nothing'); }
+  // through the real display list: a SERIES tile pinned with a look draws it, and the look is host state (the core stays unchanged)
+  const wc = await instantiateCore(Uint8Array.from(Buffer.from(readFileSync(new URL('../core/scene.wasm', import.meta.url)))));
+  dispatch(wc, 'WORKSPACE', 6); const id = (await import('../src/core.mjs')).placeTile(wc, APP.SERIES);
+  const pst = { view: 'focus', ghosts: false, notes: {}, bindings: { [id]: 'mem.used_pct' }, viz: { [id]: 'stat' }, window: 300000, events: [], editing: null, palette: null, message: '' };
+  const env = { width: 1280, height: 800, dpr: 1, time: 1, dt: Infinity, theme: P, anim: new Anim(), store: ps, now: NOW, clock: '12:00', date: 'x', metrics: {}, measure };
+  const dl = buildDisplayList(wc, pst, env); assert.ok(dl.cmds.some(o => o.op === 'text' && o.str === '79.5%' && o.surf === id), 'stat value is selectable text on its tile');
+  pst.viz[id] = 'status'; pst.anim = null; env.anim = new Anim(); assert.ok(buildDisplayList(wc, pst, env).cmds.some(o => o.op === 'text' && o.str === 'Up'));
+  const zs = { ...pst, zoom: true, viz: { [id]: 'stat' } }; env.anim = new Anim(); const zl = buildDisplayList(wc, zs, env); const big = zl.hits.filter(h => h.kind === 'tile'); assert.equal(big.length, 1, 'zoom draws only the selected tile'); assert.ok(big[0].w > 900, 'and it fills the area');
+  const sq = buildDisplayList(wc, { ...pst, viz: {} }, { ...env, anim: new Anim() }).hits.filter(h => h.kind === 'tile'); assert.ok(sq.length >= 1 && sq.every(h => Math.abs(h.w - h.h) <= 2), 'cells are square: ' + sq.map(h => h.w + 'x' + h.h));
+  const zu = { view: 'focus', notes: {}, events: [], bindings: {}, viz: {} }; handleKeyName(wc, zu, 'z'); assert.equal(zu.zoom, true); handleKeyName(wc, zu, 'Escape'); assert.equal(zu.zoom, false); assert.equal(zu.view, 'focus', 'esc leaves zoom first, not the view');
+}
+
 console.log('PASS — telemetry drawing: bounded ops, gaps, thresholds, logs/traces/sys, flow model, every view x workspace, status injection, bindings, log filter/scroll, Unicode text');

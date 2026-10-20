@@ -6,7 +6,7 @@ import { Store, baseName } from '../src/telemetry.mjs';
 import { startBrowserInjector, installInjectors, Sources, injectInto } from './injectors.mjs';
 import { connectDaemon } from './daemon.mjs';
 import { VT, encodeKey, encodeMouse } from '../src/vt.mjs';
-import { WINDOWS, windowLabel, filterLogs, formatLogLine } from './telemetry-draw.mjs';
+import { WINDOWS, PANEL_KINDS, windowLabel, filterLogs, formatLogLine } from './telemetry-draw.mjs';
 import { buildDisplayList, THEMES, Anim, WALLPAPERS } from './displaylist.mjs';
 import { createGpuRenderer } from './gpu.mjs';
 import { createCanvasRenderer } from './canvas2d.mjs';
@@ -29,7 +29,7 @@ async function boot() {
   if (!renderer) renderer = createCanvasRenderer(canvas);
 
   let restored = false;
-  const st = { view: 'focus', ghosts: false, notes: { ...DEFAULT_NOTES }, bindings: { ...DEFAULT_BINDINGS }, window: 300000, cam: { manual: false, yaw: 0.6, pitch: 0.5, dist: 2.7 }, events: [], editing: null, palette: null, message: '' };
+  const st = { view: 'focus', ghosts: false, notes: { ...DEFAULT_NOTES }, bindings: { ...DEFAULT_BINDINGS }, viz: {}, window: 300000, cam: { manual: false, yaw: 0.6, pitch: 0.5, dist: 2.7 }, events: [], editing: null, palette: null, message: '' };
   // Everything shown by telemetry tiles comes from this store; injectors are the only writers.
   const store = new Store();
   store.onStatus = m => m.id > 0 && api.kijo_report(m.id, m.state, m.kind, m.progress) === 1;
@@ -38,13 +38,13 @@ async function boot() {
   if (!params.has('fresh')) {
     try {
       const raw = localStorage.getItem(STORE);
-      if (raw) { const j = JSON.parse(raw); st.notes = applyState(api, j); st.bindings = j.bindings ?? { ...DEFAULT_BINDINGS }; if (WINDOWS.includes(j.window)) st.window = j.window; restored = true; log('Restored saved workspace'); }
+      if (raw) { const j = JSON.parse(raw); st.notes = applyState(api, j); st.bindings = j.bindings ?? { ...DEFAULT_BINDINGS }; st.viz = j.viz && typeof j.viz === 'object' ? j.viz : {}; if (WINDOWS.includes(j.window)) st.window = j.window; restored = true; log('Restored saved workspace'); }
     }
     catch (err) { console.warn('Ignoring saved state:', err.message); }
   }
   if (VIEWS.includes(params.get('view'))) st.view = params.get('view');
   let syncTimer = 0, daemon = null;
-  const snapshotState = () => serializeState(api, st.notes, { bindings: st.bindings, window: st.window });
+  const snapshotState = () => serializeState(api, st.notes, { bindings: st.bindings, viz: st.viz, window: st.window });
   const save = () => {
     try { localStorage.setItem(STORE, JSON.stringify(snapshotState())); } catch {}
     if (daemon) { clearTimeout(syncTimer); syncTimer = setTimeout(() => daemon?.saveSession(snapshotState()), 800); } // layout follows you to the next device
@@ -77,7 +77,7 @@ async function boot() {
     daemon?.close(); url = url.replace(/\/$/, '');
     try { sessionStorage.setItem('kijo.daemon', JSON.stringify({ url, token })); } catch {}
     let first = true;
-    daemon = connectDaemon({ url, token, store, onState: s => { dstate.state = s; if (s === 'connected' && first) { first = false; log('kijod connected ' + url); if (!restored) daemon.loadSession().then(j => { if (j && j.version === 2) { try { st.notes = applyState(api, j); st.bindings = j.bindings ?? st.bindings; say('layout loaded from kijod'); } catch {} } }); } if (s === 'unauthorized') say('kijod: wrong token'); }, onInfo: i => { dstate.host = i.host; dstate.shell = i.shell; }, onPty: onPty });
+    daemon = connectDaemon({ url, token, store, onState: s => { dstate.state = s; if (s === 'connected' && first) { first = false; log('kijod connected ' + url); if (!restored) daemon.loadSession().then(j => { if (j && j.version === 2) { try { st.notes = applyState(api, j); st.bindings = j.bindings ?? st.bindings; st.viz = j.viz && typeof j.viz === 'object' ? j.viz : st.viz; say('layout loaded from kijod'); } catch {} } }); } if (s === 'unauthorized') say('kijod: wrong token'); }, onInfo: i => { dstate.host = i.host; dstate.shell = i.shell; }, onPty: onPty });
   }
   function disconnect() { daemon?.close(); daemon = null; dstate.state = 'off'; dstate.shell = false; try { sessionStorage.removeItem('kijo.daemon'); } catch {} }
   // Same-origin relay: kijod prints  http://host:port/#token=...  - read it once, then drop it from the address bar.
@@ -98,9 +98,11 @@ async function boot() {
     const items = [];
     [...VIEWS, 'flow'].forEach((v, i) => items.push({ title: `View: ${v}`, hint: String(i + 1), run: () => (st.view = v) }));
     // Telemetry: pin what was injected. Names come from the live store, nothing is hard-coded.
-    const pin = (app, name) => { const id = placeTile(api, app); if (!id) return say('No free slot in this workspace'); if (name) st.bindings[id] = name; st.view = 'focus'; log(`Pinned ${name || tag({ app })} as #${id}`); };
+    const pin = (app, name, viz) => { const id = placeTile(api, app); if (!id) return say('No free slot in this workspace'); if (name) st.bindings[id] = name; if (viz) st.viz[id] = viz; st.view = 'focus'; log(`Pinned ${name || tag({ app })} as #${id}`); };
     const groups = [...new Set([...store.series.keys()].map(baseName))].sort();
     for (const g of groups) items.push({ title: `Pin chart: ${g}`, hint: 'chart', run: () => pin(APP.SERIES, g) });
+    for (const g of groups) for (const kind of ['stat', 'gauge', 'bars', 'status']) items.push({ title: `Pin ${kind}: ${g}`, hint: kind, run: () => pin(APP.SERIES, g, kind) });
+    { const t = selectedTile(api); if (t.kind === 1 && t.app === APP.SERIES) for (const kind of PANEL_KINDS) items.push({ title: `Panel look: ${kind} (selected tile)`, hint: 'panel', run: () => { if (kind === 'chart') delete st.viz[t.id]; else st.viz[t.id] = kind; } }); }
     items.push({ title: 'Pin logs', hint: 'tile', run: () => pin(APP.LOGS) }, { title: 'Pin traces', hint: 'tile', run: () => pin(APP.TRACES) }, { title: 'Pin system', hint: 'tile', run: () => pin(APP.SYS) }, { title: 'Pin 3D surface', hint: 'tile', run: () => pin(APP.SCENE3D) });
     for (const ms of WINDOWS) items.push({ title: `Time window: ${windowLabel(ms)}`, hint: '[ ]', run: () => (st.window = ms) });
     const q0 = q.trim(), mm = q0.match(/^(pull|ws|kijod)\s+(\S+)(?:\s+(\S+))?/i);

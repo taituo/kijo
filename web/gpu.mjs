@@ -50,7 +50,8 @@ class GlyphAtlas {
       ctx.font = this.font(e);
       e.cps.forEach((cp, i) => {
         const gx = (i % e.cols) * e.cw + 1, gy = e.y + Math.floor(i / e.cols) * e.ch + 1;
-        ctx.fillText(String.fromCodePoint(cp), gx, gy + Math.round(e.px * 0.12));
+        ctx.save(); ctx.beginPath(); ctx.rect(gx - 1, gy - 1, e.cw, e.ch); ctx.clip(); // tall accents (A-ring, O-umlaut) must not leak into the row above
+        ctx.fillText(String.fromCodePoint(cp), gx, gy + Math.round(e.px * 0.12)); ctx.restore();
       });
     }
     this.dirty = false;
