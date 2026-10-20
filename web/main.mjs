@@ -119,6 +119,7 @@ async function boot() {
     if (dstate.shell) items.push({ title: 'Terminal: new shell tile here', hint: 'kijod', run: () => { if (st.terms.size >= 4) return say('kijod allows 4 shells at a time'); const id = placeTile(api, APP.SHELL); if (!id) return say('No free slot in this workspace'); st.view = 'focus'; log(`Pinned shell as #${id}`); const t = getTiles(api).find(x => x.id === id); if (t) enterTerm(t); } });
     if (dstate.shell) items.push({ title: 'Terminal: open shell', hint: 'kijod', run: () => { const e = shellTiles().find(x => !st.terms.has(x.t.id) || st.terms.get(x.t.id).exited !== null) || shellTiles()[0]; if (!e) return say('no shell tile (Reset demo workspace restores one)'); goTo(e.w, e.i % SIDE, Math.floor(e.i / SIDE)); enterTerm(e.t); } });
     items.push({ title: 'Logs: copy all lines (filtered)', hint: 'clipboard', run: () => { const t = selectedTile(api), q = t.app === APP.LOGS ? st.logv[t.id]?.q : ''; const text = filterLogs(store.logs, q).map(formatLogLine).join('\n'); copyText(text); } });
+    items.push({ title: 'Zoom selected tile (toggle)', hint: 'Z', run: () => handleKeyName(api, st, 'z') });
     items.push({ title: 'New note here', hint: 'N', run: () => handleKeyName(api, st, 'n') });
     items.push({ title: 'Reserve a 2x2 footprint here', hint: 'F', run: () => handleKeyName(api, st, 'f') });
     items.push({ title: 'Close selected tile', hint: 'X', run: () => handleKeyName(api, st, 'x') });

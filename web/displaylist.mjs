@@ -206,7 +206,10 @@ export function buildDisplayList(api, st, env) {
   // ---------------------------------------------------------------- content area
   const hintY = H - T.hint;
   const area = { x: pad, y: B + pad * 0.7, w: W - pad * 2, h: hintY - B - pad * 1.2 };
-  const mapNode = n => ({ x: area.x + n.x / SCALE * area.w, y: area.y + n.y / SCALE * area.h, w: n.w / SCALE * area.w, h: n.h / SCALE * area.h });
+  // Cells are square: the grid lives in the largest centred square of the area (a 1x1 tile is a square,
+  // a 2x2 footprint is a bigger square). Z zooms the selected tile to fill the whole area instead.
+  const side = Math.floor(Math.min(area.w, area.h)), box = { x: area.x + Math.floor((area.w - side) / 2), y: area.y + Math.floor((area.h - side) / 2), w: side, h: side };
+  const mapNode = n => ({ x: box.x + n.x / SCALE * box.w, y: box.y + n.y / SCALE * box.h, w: n.w / SCALE * box.w, h: n.h / SCALE * box.h });
 
   // One tile card; `r` is the animated rectangle, `mode` 'focus' | 'cell'.
   function tileCard(n, r, mode, key) {
@@ -338,7 +341,7 @@ export function buildDisplayList(api, st, env) {
         } else c.text(x + 6, y + 5, `#${n.owner}`, 10, T.dim, { max: w - 12 });
       }
     } else {
-      if (!focus || st.ghosts || selected) a.stroke(x, y, w, h, selected ? T.line : T.faint, 1, rad);
+      a.stroke(x, y, w, h, selected ? T.ink : T.line, selected ? 2 : 1, rad); // the square cell stays visible so the 2x2 window reads as a grid
       if (focus && (st.ghosts || selected)) {
         c.text(x + ip, y + ip, 'empty slot', 12, T.dim, { f: 'sans' });
         if (selected) { c.text(x + ip, y + h - ip - 30, '[N] note   [F] 2x2 reservation', 12, T.ink, { max: w - ip * 2 }); c.text(x + ip, y + h - ip - 14, 'fills only what you reserve', 11, T.dim, { max: w - ip * 2 }); }
@@ -354,7 +357,7 @@ export function buildDisplayList(api, st, env) {
     const mode = st.view === 'focus' ? 'focus' : 'cell';
     // Phone / narrow window: a 2x2 would be unreadable, so the selected tile fills the area
     // (Hyprland's fullscreen). Same WASM scene, same keys; only the mapping differs.
-    const fullOne = compact && mode === 'focus';
+    const fullOne = (compact || st.zoom) && mode === 'focus';
     for (const n of scene) {
       if (fullOne && !(n.flags & FLAG.SELECTED)) continue;
       const target = fullOne ? { x: area.x, y: area.y, w: area.w, h: area.h } : mapNode(n);
@@ -363,8 +366,8 @@ export function buildDisplayList(api, st, env) {
     }
     if (mode === 'cell') {
       // The viewport Enter will land on: the WASM-owned 2x2 window.
-      const fx = api.kijo_focus_x(), fy = api.kijo_focus_y(), vw = area.w / 6, vh = area.h / 6;
-      g.dash(Math.round(area.x + fx * vw) - 1, Math.round(area.y + fy * vh) - 1, Math.round(vw * 2) + 2, Math.round(vh * 2) + 2, T.blue, 2, 12, T.radius + 2);
+      const fx = api.kijo_focus_x(), fy = api.kijo_focus_y(), vw = box.w / 6, vh = box.h / 6;
+      g.dash(Math.round(box.x + fx * vw) - 1, Math.round(box.y + fy * vh) - 1, Math.round(vw * 2) + 2, Math.round(vh * 2) + 2, T.blue, 2, 12, T.radius + 2);
       info = `6x6   ${tilesNow.filter(t => t.kind === 1).length} tiles   ${tilesNow.filter(t => t.kind === 2).length} reserved   viewport ${fx},${fy}`;
     } else info = `workspace ${wsIndex === 9 ? 'special' : wsIndex + 1}   viewport ${api.kijo_focus_x()},${api.kijo_focus_y()}   selected ${api.kijo_sel_x()},${api.kijo_sel_y()}`;
   } else if (st.view === 'workspaces') {
@@ -444,6 +447,7 @@ export function buildDisplayList(api, st, env) {
 
   // ---------------------------------------------------------------- hint line
   const ctxHint = (() => {
+    if (st.zoom && st.view === 'focus') return 'zoomed: Z or esc back to the grid   arrows pick another tile';
     if (st.editing) return 'writing   esc save   enter newline   backspace delete';
     if (st.capture) return 'keys go to the shell   ctrl+] release   ctrl+shift+c copy   ctrl+shift+v paste   wheel / shift+pgup scroll';
     if (sel.app === APP.SHELL && st.terms?.has(sel.id)) return 'enter or click captures keys   drag selects text   wheel scrolls   X close';

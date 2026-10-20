@@ -137,7 +137,8 @@ export function handleKeyName(api, ui, key) {
     else dispatch(api, 'MOVEFOCUS', DIR[arrows[key]]);
   } else if (swaps[key]) dispatch(api, 'SWAP', DIR[swaps[key]]);
   else if (key === 'Enter') ui.view = ui.view === 'workspaces' ? 'overview' : ui.view === 'overview' ? 'focus' : ui.view;
-  else if (key === 'Escape') ui.view = ui.view === 'focus' ? 'overview' : ui.view === 'overview' ? 'workspaces' : ui.view;
+  else if (key === 'Escape') { if (ui.zoom) ui.zoom = false; else ui.view = ui.view === 'focus' ? 'overview' : ui.view === 'overview' ? 'workspaces' : ui.view; }
+  else if (key === 'z') ui.zoom = !ui.zoom;
   else if (key === ',' || key === '.') dispatch(api, 'CYCLEWORKSPACE', key === '.' ? 1 : -1);
   else if (key === 's') dispatch(api, 'TOGGLESPECIAL');
   else if (key === 'm') { const to = (api.kijo_ws() + 1) % 9; if (dispatch(api, 'MOVETOWORKSPACE', to)) log(`Moved tile #${t.id} to workspace ${to + 1}`); }
