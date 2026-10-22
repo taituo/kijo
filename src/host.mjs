@@ -10,7 +10,7 @@ import { spawn } from 'node:child_process';
 import process from 'node:process';
 import {
   instantiateCore, getTiles, getScene, getEvents, serializeState, applyState, selectedTile, dispatch, handleKeyName,
-  label, tag, KIND, NODE, STATUS, BLOCKED_KIND, VIEWS, APP, FLAG, SIDE, DIR, OP, DEFAULT_NOTES,
+  label, tag, KIND, NODE, STATUS, BLOCKED_KIND, VIEWS, APP, FLAG, SIDE, DIR, OP, DEFAULT_NOTES, getCanvasNodes,
 } from './core.mjs';
 export { getTiles, getScene, KIND, STATUS, VIEWS };
 
@@ -58,6 +58,9 @@ export function barText(api) {
 export function render(api, { view = 'focus', cols = 106, rows = 35, ghosts = true, notes = {}, events = [], connected = false } = {}) {
   cols = Math.max(52, Math.min(240, cols)); rows = Math.max(18, Math.min(80, rows));
   const surf = new Surface(cols, rows);
+  // Canvas: the core lays out a viewport of cells x 8 by cells x 16 "pixels"; one character is one cell.
+  // No animation in a terminal: land on the camera target before the scene is built.
+  if (view === 'canvas') { api.kijo_canvas_viewport((cols - 4) * 8, (rows - 9) * 16); api.kijo_canvas_step(1000); }
   const scene = getScene(api, view), tiles = getTiles(api);
   const now = new Date().toLocaleTimeString('en-GB', { hour12: false });
   surf.put(1, 0, `KIJO ${barText(api)}`);
@@ -129,10 +132,28 @@ export function render(api, { view = 'focus', cols = 106, rows = 35, ghosts = tr
     const core = getEvents(api).map(e => `#${String(e.seq).padStart(3)} ${['', 'spawn', 'close', 'promote', 'status', 'workspace', 'move', 'reset'][e.op].padEnd(9)} tile ${e.id} a=${e.a} b=${e.b}`);
     const live = scene.map(n => `Tile #${n.id}   state ${STATUS[n.status]}  tx-group ${n.group}`);
     [...core, ...events, ...live].slice(-Math.max(1, rows - 14)).forEach((e, i) => surf.put(3, 7 + i, e));
+  } else if (view === 'canvas') {
+    const table = getCanvasNodes(api), cell = n => ({ x: x0 + Math.round(n.x / 8), y: y0 + Math.round(n.y / 16), w: Math.round(n.w / 8), h: Math.round(n.h / 16) });
+    const inside = (x, y) => x >= x0 && x < x0 + maxW && y >= y0 && y < y0 + maxH;
+    const clip = (x, y, s) => { [...s].forEach((c, j) => { if (inside(x + j, y)) surf.put(x + j, y, c); }); };
+    for (const n of scene) {
+      const t = table[n.meta], r = cell(n);
+      if (n.kind === NODE.LINK || !t) continue;
+      const sel = !!(n.flags & FLAG.SELECTED), ghost = n.kind === NODE.GHOST;
+      if (r.w >= 3 && r.h >= 2) {
+        const top = '+' + (ghost ? '.' : '-').repeat(r.w - 2) + '+', side = sel ? '#' : t.app === APP.GROUP ? ':' : '|';
+        clip(r.x, r.y, top); clip(r.x, r.y + r.h - 1, top);
+        for (let yy = r.y + 1; yy < r.y + r.h - 1; yy++) { clip(r.x, yy, side); clip(r.x + r.w - 1, yy, side); }
+        const title = ghost ? 'reserved' : t.app === APP.NOTE || t.app === APP.GROUP ? String(notes[t.id] ?? '') : label(t, notes);
+        if (r.h >= 3) clip(r.x + 2, r.y + 1, (sel ? '* ' : '') + title.slice(0, Math.max(0, r.w - 4 - (sel ? 2 : 0))));
+        if (r.h >= 4 && t.app !== APP.GROUP && !ghost) clip(r.x + 2, r.y + 2, `${tag(t)} ${STATUS[t.status]}`.slice(0, Math.max(0, r.w - 4)));
+      } else clip(r.x, r.y, sel ? '#' : ghost ? ':' : MARK[STATUS[t.status]] === '.' ? 'o' : MARK[STATUS[t.status]]);
+    }
+    surf.put(2, rows - 6, `canvas  zoom ${Math.round(api.kijo_canvas_zoom() / 655.36)}%  ${table.length} nodes  arrows move  enter fly  esc fit  + - zoom  n note  f reserve  l link`);
   }
   surf.put(1, rows - 4, '-'.repeat(cols - 2));
   surf.put(2, rows - 3, metrics.slice(0, cols - 4));
-  surf.put(2, rows - 2, '[1-5] views  [arrows] move  [shift+arrows] swap  [,][.] ws  [n] note  [f] 2x2  [x] close  [m] to ws  [s] special  [t] state  [g] ghosts  [r] reset  [q] quit'.slice(0, cols - 4));
+  surf.put(2, rows - 2, '[1-5,7] views  [arrows] move  [shift+arrows] swap  [,][.] ws  [n] note  [f] 2x2  [x] close  [m] to ws  [s] special  [t] state  [g] ghosts  [r] reset  [q] quit'.slice(0, cols - 4));
   return surf.toString();
 }
 
@@ -164,7 +185,7 @@ export async function main(argv = process.argv.slice(2)) {
   const api = await loadCore();
   const opts = { view: 'focus', flow: false, ghosts: true, notes: { ...DEFAULT_NOTES }, events: [] };
   if (!argv.includes('--fresh')) opts.notes = restore(api);
-  const viewArg = argv.indexOf('--view'); if (viewArg >= 0 && VIEWS.includes(argv[viewArg + 1])) opts.view = argv[viewArg + 1];
+  const viewArg = argv.indexOf('--view'); if (viewArg >= 0 && (VIEWS.includes(argv[viewArg + 1]) || argv[viewArg + 1] === 'canvas')) opts.view = argv[viewArg + 1];
   if (argv.includes('--once') || !process.stdin.isTTY) { console.log(render(api, { ...opts, cols: process.stdout.columns || 106, rows: process.stdout.rows || 35 })); return; }
   const redraw = () => process.stdout.write('\x1b[H\x1b[2J' + render(api, { ...opts, cols: process.stdout.columns, rows: process.stdout.rows }));
   process.stdin.setRawMode(true); process.stdin.resume(); process.stdin.setEncoding('utf8');

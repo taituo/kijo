@@ -5,7 +5,8 @@
 // Visual language: Bauhaus wireframe, but built like an OS shell: a layer bar with an exclusive
 // zone, workspace pills with attention marks, proportional type for titles, mono for data,
 // tokens for radius/gap so theming later changes values, not code.
-import { NODE, FLAG, STATUS, BLOCKED_KIND, APP, SCALE, EVENT, getScene, getTiles, getEvents, label, tag, selectedTile } from '../src/core.mjs';
+import { NODE, FLAG, STATUS, BLOCKED_KIND, APP, SCALE, EVENT, KIND, Q16, LINK_KIND, getScene, getTiles, getEvents, getCanvasNodes, label, tag, selectedTile, selectedNode } from '../src/core.mjs';
+import { toWorld, toScreen, canvasBounds } from '../src/canvas.mjs';
 import { drawStat, drawGauge, drawBars, drawStatus, drawChart, drawSpark, drawLogs, drawTraces, drawSys, drawFlow, surfaceModel, fmtVal, windowLabel, shortName } from './telemetry-draw.mjs';
 import { baseName } from '../src/telemetry.mjs';
 import { selection } from './textsel.mjs';
@@ -120,7 +121,8 @@ export function buildDisplayList(api, st, env) {
   const barKeys = id => [].concat(bindings[id] ?? []).flatMap(b => !store ? [] : store.series.has(b) ? [b] : [...store.series.keys()].filter(k => baseName(k) === b).sort());
   const cur = api.kijo_special_open() ? -1 : api.kijo_ws();
   const wsIndex = api.kijo_special_open() ? 9 : api.kijo_ws();
-  const sel = selectedTile(api);
+  const onCanvas = st.view === 'canvas';
+  const sel = onCanvas ? selectedNode(api) ?? { kind: 0, app: 0 } : selectedTile(api);
 
   // Attention across every workspace, straight from the core's tile tables.
   const count = { blocked: 0, error: 0, working: 0, done: 0 };
@@ -129,6 +131,10 @@ export function buildDisplayList(api, st, env) {
   }
 
   if (T.glass) cmds.push({ op: 'wall' }); else g.fill(0, 0, W, H, T.bg);
+  // The canvas fills everything between the bar and the hint line; both are drawn on top of it.
+  const canvasArea = onCanvas ? { x: 0, y: T.bar, w: W, h: H - T.hint - T.bar } : null;
+  let canvasInfo = '', canvasMoving = false;
+  if (onCanvas) drawCanvas(canvasArea);
 
   // ---------------------------------------------------------------- bar (layer, exclusive zone)
   const B = T.bar, pad = Math.round(clamp(W * 0.015, 10, 26));
@@ -195,8 +201,9 @@ export function buildDisplayList(api, st, env) {
     const space = rx - bx - 20;
     let title, sub = '', subColor = T.dim;
     if (sel.kind === 1) { title = label(sel, st.notes, bindings); sub = STATUS[sel.status] + (sel.status === 2 && sel.blockedKind ? ': ' + BLOCKED_KIND[sel.blockedKind] : '') + (sel.progress ? ` ${sel.progress}%` : ''); subColor = statusColor(T, sel.status); }
+    else if (sel.kind === 2 && onCanvas) { const o = sel.owner ? getCanvasNodes(api).find(c => c.id === sel.owner) : null; title = o ? 'ghost - reserved by ' + label(o, st.notes, bindings) : 'ghost - reserved space'; }
     else if (sel.kind === 2) { title = `ghost - reserved by #${sel.owner}`; }
-    else title = 'empty slot';
+    else title = onCanvas ? 'canvas' : 'empty slot';
     const tw = measure(title, 13, 'sans', 600), sw = sub ? measure(sub, 12) + 12 : 0;
     if (tw + sw < space) {
       const x = bx + (space - tw - sw) / 2 + 10;
@@ -214,11 +221,12 @@ export function buildDisplayList(api, st, env) {
   const mapNode = n => ({ x: box.x + n.x / SCALE * box.w, y: box.y + n.y / SCALE * box.h, w: n.w / SCALE * box.w, h: n.h / SCALE * box.h });
 
   // One tile card; `r` is the animated rectangle, `mode` 'focus' | 'cell'.
-  function tileCard(n, r, mode, key) {
-    const t = tilesNow[n.meta], selected = !!(n.flags & FLAG.SELECTED), a = mk(r.a), focus = mode === 'focus';
-    const gap = focus ? T.gap : 4, x = Math.round(r.x + gap / 2), y = Math.round(r.y + gap / 2), w = Math.round(r.w - gap), h = Math.round(r.h - gap);
+  // opt (canvas): { tile, hit: hit kind keyed by id, gap, canvas: no grid bookkeeping lines }
+  function tileCard(n, r, mode, key, opt = {}) {
+    const t = opt.tile ?? tilesNow[n.meta], selected = !!(n.flags & FLAG.SELECTED), a = mk(r.a), focus = mode === 'focus';
+    const gap = opt.gap ?? (focus ? T.gap : 4), x = Math.round(r.x + gap / 2), y = Math.round(r.y + gap / 2), w = Math.round(r.w - gap), h = Math.round(r.h - gap);
     if (w < 4 || h < 4) return;
-    hits.push({ kind: 'tile', meta: n.meta, x, y, w, h });
+    hits.push(opt.hit ? { kind: opt.hit, id: t.id, x, y, w, h } : { kind: 'tile', meta: n.meta, x, y, w, h });
     const rad = focus ? T.radius : Math.min(T.radius, 4), ip = focus ? clamp(w * 0.045, 12, 22) : 7;
     const show = clamp(r.settle, 0, 1), c = mk(r.a * show); // content fades in as the glide settles
     const ring = () => { if (selected) { a.stroke(x - 3, y - 3, w + 6, h + 6, st.capture === t.id ? T.blue : T.ink, st.capture === t.id ? 3 : 2, rad + 3); } };
@@ -247,7 +255,7 @@ export function buildDisplayList(api, st, env) {
         const ch = tag(t)[0] || '?';
         c.text(x + ip + (bs - measure(ch, 12, 'mono', 700)) / 2, y + ip + 3, ch, 12, sc === T.dim ? T.ink : T.onAccent, { f: 'mono', w: 700 });
         const editing = st.editing && st.editing.id === t.id;
-        const title = isNote ? (editing ? 'editing note' : 'NOTE ' + t.id) : label(t, st.notes, bindings);
+        const title = isNote ? (editing ? 'editing note' : opt.canvas ? 'NOTE' + (st.cids?.[t.id] ? '  ' + st.cids[t.id] : '') : 'NOTE ' + t.id) : label(t, st.notes, bindings);
         c.text(x + ip + bs + 10, y + ip + 1, title, 15, editing ? T.blue : fg, { f: 'sans', w: 600, max: w - ip * 2 - bs - 110 });
         const stm = t.app === APP.SHELL ? st.terms?.get(t.id) : null, capt = st.capture === t.id, lgv = t.app === APP.LOGS ? st.logv?.[t.id] : null;
         const state = lgv && (lgv.edit || lgv.q || lgv.off) ? (lgv.edit ? 'find: ' + lgv.q + (Math.floor(env.time * 2) % 2 ? '|' : ' ') : (lgv.q ? lgv.q + '  ' : '') + (lgv.off ? '-' + lgv.off + '  End = live' : 'filtered')) : stm ? (capt ? 'keys > shell  ^] release' : stm.exited !== null ? 'exited ' + stm.exited : stm.view > 0 ? 'scrollback -' + stm.view : 'live') : t.app >= APP.SYS ? (t.app === APP.SERIES || t.app === APP.SCENE3D ? windowLabel(winMs) : 'live') : STATUS[t.status] + (t.status === 2 && t.blockedKind ? ': ' + BLOCKED_KIND[t.blockedKind] : '');
@@ -314,7 +322,7 @@ export function buildDisplayList(api, st, env) {
           c.text(x + ip, by, 'no remote configured', 13, fg, { f: 'sans', w: 500 });
           c.text(x + ip, by + 22, 'SSH and Herdr attach through kijod', 12, sub, { max: bw });
         } else c.text(x + ip, by, tag(t), 12, sub);
-        if (h > 230 && t.app < APP.SYS) c.text(x + ip, y + h - ip - (t.progress > 0 || t.status === 1 ? 26 : 14), `#${t.id}  group ${t.group}  tx ${t.tx}`, 11, T.dim, { max: bw });
+        if (h > 230 && t.app < APP.SYS && !opt.canvas) c.text(x + ip, y + h - ip - (t.progress > 0 || t.status === 1 ? 26 : 14), `#${t.id}  group ${t.group}  tx ${t.tx}`, 11, T.dim, { max: bw });
       } else {
         // heatmap cell: glanceable, status-first
         const small = h < 44 || w < 56;
@@ -355,7 +363,8 @@ export function buildDisplayList(api, st, env) {
   }
 
   let info = '';
-  if (st.view === 'focus' || st.view === 'overview') {
+  if (onCanvas) info = canvasInfo;
+  else if (st.view === 'focus' || st.view === 'overview') {
     const mode = st.view === 'focus' ? 'focus' : 'cell';
     // Phone / narrow window: a 2x2 would be unreadable, so the selected tile fills the area
     // (Hyprland's fullscreen). Same WASM scene, same keys; only the mapping differs.
@@ -451,6 +460,7 @@ export function buildDisplayList(api, st, env) {
   const ctxHint = (() => {
     if (st.zoom && st.view === 'focus') return 'zoomed: Z or esc back to the grid   arrows pick another tile';
     if (st.editing) return 'writing   esc save   enter newline   backspace delete';
+    if (onCanvas) return api.kijo_canvas_marked() ? 'link: move to the target and press L   L on the same node cancels' : sel.kind === 2 ? 'N fill with a note   X release   drag moves   arrows move' : 'drag pans   wheel zooms   arrows move   enter flies   esc fits   N note   F reserve   L link   E write   X close';
     if (st.capture) return 'keys go to the shell   ctrl+] release   ctrl+shift+c copy   ctrl+shift+v paste   wheel / shift+pgup scroll';
     if (sel.app === APP.SHELL && st.terms?.has(sel.id)) return 'enter or click captures keys   drag selects text   wheel scrolls   X close';
     if (st.view === 'workspaces') return 'click or , . to switch   enter opens   S scratchpad   M move tile on';
@@ -463,7 +473,8 @@ export function buildDisplayList(api, st, env) {
     if (sel.app >= APP.SYS) return 'X close   / pin series   shift+arrows swap   paste data to inject';
     return 'T state   X close   shift+arrows swap   M to next ws';
   })();
-  const keys = '   |   1-6 views   , . workspace   [ ] window   / search   R reset';
+  const keys = onCanvas ? '   |   1-7 views   / search   R reset' : '   |   1-7 views   , . workspace   [ ] window   / search   R reset';
+  if (onCanvas) g.fill(0, hintY, W, H - hintY, T.glass ? [T.bg[0], T.bg[1], T.bg[2], 0.86] : T.bg);
   g.fill(0, hintY, W, 1, T.faint);
   const room = compact ? W - pad * 2 : W - pad * 2 - measure(info, 11) - 28;
   const full = ctxHint + keys;
@@ -496,5 +507,132 @@ export function buildDisplayList(api, st, env) {
     const at = cmds.findIndex(k => k.op === 'text' && k.surf === st.sel.surf);
     if (at >= 0) cmds.splice(at, 0, ...r.rects.map(q => ({ op: 'fill', x: q.x, y: q.y, w: q.w, h: q.h, c: A(T.blue, 0.38), r: 2 })));
   }
-  return { cmds, hits, animating: anim.moving, selectionText, termSizes, logInfo };
+  return { cmds, hits, animating: anim.moving || canvasMoving, selectionText, termSizes, logInfo, canvasArea };
+
+  // ------------------------------------------------------------------ canvas (view 7)
+  // The core emits screen rectangles (viewport px), level of detail and links; this draws them.
+  function drawCanvas(CA) {
+    api.kijo_canvas_viewport(Math.round(CA.w), Math.round(CA.h));
+    canvasMoving = !!api.kijo_canvas_step(Math.round(Math.min(1000, dt * 1000)));
+    const z = api.kijo_canvas_zoom() / Q16, table = getCanvasNodes(api), scene = getScene(api, 'canvas');
+    // dot grid: world spacing that stays at least 22 px apart on screen
+    let sp = 32; while (sp * z < 22) sp *= 4;
+    const [wx0, wy0] = toWorld(api, 0, 0), gx0 = Math.floor(wx0 / sp) * sp, gy0 = Math.floor(wy0 / sp) * sp, [s0x, s0y] = toScreen(api, gx0, gy0), step = sp * z;
+    const cols = Math.ceil(CA.w / step) + 2, rows = Math.ceil(CA.h / step) + 2, dot = A(T.line, T.glass ? 0.45 : 0.5);
+    if (cols * rows <= 5000) for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+      const x = Math.round(CA.x + s0x + i * step), y = Math.round(CA.y + s0y + j * step);
+      if (x >= CA.x && x < CA.x + CA.w && y >= CA.y && y < CA.y + CA.h) g.fill(x - 1, y - 1, 2, 2, dot);
+    }
+    const R = n => ({ x: CA.x + n.x, y: CA.y + n.y, w: n.w, h: n.h, a: 1, settle: 1, off: 0 });
+    const rects = new Map(); for (const n of scene) if (n.kind === NODE.TILE || n.kind === NODE.GHOST) rects.set(n.id, R(n));
+    const text = t => (t.app === APP.NOTE || t.app === APP.GROUP ? (st.editing?.id === t.id ? st.editing.text + (Math.floor(env.time * 2) % 2 ? '|' : ' ') : st.notes[t.id] ?? '') : label(t, st.notes, bindings));
+    let tiles = 0, links = 0;
+    for (const n of scene) {
+      const t = table[n.meta], r = rects.get(n.id);
+      if (n.kind === NODE.LINK) { links++; connector(n, rects.get(n.owner), rects.get(n.group)); continue; }
+      if (!t || !r) continue;
+      tiles++;
+      if (n.kind === NODE.TILE && t.app === APP.GROUP) group(n, t, r);
+      else if (n.kind === NODE.GHOST) ghost(n, t, r);
+      else if (n.material === 2) tileCard(n, r, 'focus', null, { tile: t, hit: 'cnode', gap: 0, canvas: true });
+      else if (n.material === 1) titleCard(n, t, r);
+      else dotNode(n, t, r);
+      if (n.flags & FLAG.LINK_FROM) g.dash(Math.round(r.x) - 6, Math.round(r.y) - 6, Math.round(r.w) + 12, Math.round(r.h) + 12, T.blue, 2, 10, T.radius + 6);
+    }
+    minimap(CA);
+    const sid = api.kijo_canvas_sel();
+    canvasInfo = `canvas   zoom ${Math.round(z * 100)}%   ${api.kijo_canvas_node_count()} nodes   ${api.kijo_canvas_edge_count()} links   ${tiles} drawn` + (sid ? `   selected ${st.cids?.[sid] ?? '#' + sid}` : '');
+
+    function group(n, t, r) {
+      const x = Math.round(r.x), y = Math.round(r.y), w = Math.round(r.w), h = Math.round(r.h), on = !!(n.flags & FLAG.SELECTED);
+      const rad = Math.max(4, Math.min(18, Math.round(14 * z)));
+      g.fill(x, y, w, h, A(T.ink, T.glass ? 0.05 : 0.035), rad);
+      g.stroke(x, y, w, h, on ? T.ink : A(T.line, 0.9), on ? 2 : 1, rad);
+      const size = Math.max(11, Math.min(26, Math.round(17 * z))), lbl = text(t) || 'group';
+      if (w > 40 && h > size + 8) g.text(x + Math.max(8, 14 * z), y + Math.max(6, 12 * z), lbl, size, st.editing?.id === t.id ? T.blue : T.ink, { f: 'sans', w: 600, max: w - 20 });
+      hits.push({ kind: 'cnode', id: t.id, x, y, w, h: Math.min(h, size + Math.max(12, 24 * z)) });
+    }
+    function ghost(n, t, r) {
+      const x = Math.round(r.x), y = Math.round(r.y), w = Math.round(r.w), h = Math.round(r.h), on = !!(n.flags & FLAG.SELECTED);
+      if (w < 3 || h < 3) return;
+      const rad = n.material ? T.radius : 2;
+      g.fill(x, y, w, h, A(T.blue, 0.06), rad);
+      g.dash(x, y, w, h, A(T.blue, on ? 1 : 0.7), on ? 2 : 1, n.material === 2 ? 10 : 6, rad);
+      hits.push({ kind: 'cnode', id: t.id, x, y, w, h });
+      if (n.material >= 1) {
+        const owner = t.owner ? table.find(o => o.id === t.owner) : null, ip = n.material === 2 ? 14 : 6;
+        g.text(x + ip, y + ip, owner ? 'reserved by ' + label(owner, st.notes, bindings) : 'reserved', n.material === 2 ? 12 : 10, T.blue, { f: 'sans', max: w - ip * 2 });
+        if (n.material === 2) g.text(x + ip, y + ip + 18, 'room for work that is not here yet', 11, T.dim, { max: w - ip * 2 });
+        if (on && h > 60) g.text(x + ip, y + h - ip - 14, '[N] fill with a note', 12, T.ink, { max: w - ip * 2 });
+      }
+    }
+    function titleCard(n, t, r) {
+      const x = Math.round(r.x), y = Math.round(r.y), w = Math.round(r.w), h = Math.round(r.h), on = !!(n.flags & FLAG.SELECTED), isNote = t.app === APP.NOTE;
+      let fill = T.panel, fg = T.ink;
+      if (n.status === 2) { fill = T.yellow; fg = T.onAccent; } else if (n.status === 3) { fill = T.red; fg = T.onAccent; }
+      else if (n.status === 1) fill = mix(T.panel, T.blue, 0.16); else if (isNote) fill = mix(T.panel, T.yellow, 0.1);
+      if (T.glass) g.glass(x, y, w, h, n.status >= 2 ? fill : white, Math.min(T.radius, 8), n.status >= 2 ? 0.82 : n.status === 1 || isNote ? 0.2 : 0.1, 8);
+      else g.fill(x, y, w, h, fill, Math.min(T.radius, 4));
+      g.stroke(x, y, w, h, n.status >= 2 ? fill : T.line, 1, Math.min(T.radius, 4));
+      if (isNote) g.fill(x, y, 3, h, T.yellow);
+      hits.push({ kind: 'cnode', id: t.id, x, y, w, h });
+      const size = Math.max(9, Math.min(15, Math.round(h * 0.16))), ip = Math.max(5, Math.round(size * 0.6));
+      if (!isNote) g.text(x + ip, y + ip, tag(t), Math.max(8, size - 3), n.status >= 2 ? fg : T.dim, { w: 600, max: w - ip * 2 });
+      const top = isNote ? y + ip : y + ip + size + 2, lines = Math.max(1, Math.floor((y + h - ip - top) / (size * 1.3)));
+      if (lines >= 1 && h > size + ip * 2) g.wrap(x + ip, top, text(t) || (isNote ? 'empty note' : ''), size, fg, w - ip * 2, lines, Math.round(size * 1.3), { f: 'sans', w: isNote ? 500 : 600 });
+      if (t.progress > 0 && h > 30) { g.fill(x + 4, y + h - 6, w - 8, 3, T.faint, 2); g.fill(x + 4, y + h - 6, (w - 8) * t.progress / 100, 3, T.blue, 2); }
+      if (on) g.stroke(x - 3, y - 3, w + 6, h + 6, T.ink, 2, Math.min(T.radius, 4) + 3);
+    }
+    function dotNode(n, t, r) {
+      const s = Math.max(4, Math.round(Math.min(r.w, r.h))), w = Math.max(4, Math.round(r.w)), h = Math.max(4, Math.round(r.h)), x = Math.round(r.x), y = Math.round(r.y);
+      const c = n.status ? statusColor(T, n.status) : t.app === APP.NOTE ? T.yellow : A(T.ink, 0.6);
+      g.fill(x, y, w, h, c, Math.min(3, s / 3));
+      if (n.flags & FLAG.SELECTED) g.stroke(x - 3, y - 3, w + 6, h + 6, T.ink, 2, 4);
+      hits.push({ kind: 'cnode', id: t.id, x: x - 4, y: y - 4, w: w + 8, h: h + 8 });
+    }
+    // Orthogonal connector between two node rectangles (falls back to centres when an end is off screen).
+    function connector(n, ra, rb) {
+      const own = n.material === LINK_KIND.OWNER, on = !!(n.flags & FLAG.SELECTED);
+      if (own && !(st.ghosts || on || z >= 0.35)) return;
+      const c = own ? A(T.blue, on ? 0.9 : 0.55) : on ? T.ink : A(T.dim, 0.9), th = own || z < 0.5 ? 1 : 2;
+      const a = { x: CA.x + n.x, y: CA.y + n.y }, b = { x: CA.x + n.w, y: CA.y + n.h }, horiz = Math.abs(b.x - a.x) >= Math.abs(b.y - a.y);
+      const seg = (x0, y0, x1, y1) => { // axis-aligned; dashed for ownership
+        const len = Math.abs(x1 - x0) + Math.abs(y1 - y0), dx = Math.sign(x1 - x0), dy = Math.sign(y1 - y0);
+        if (!own) return g.fill(Math.round(Math.min(x0, x1) - th / 2), Math.round(Math.min(y0, y1) - th / 2), Math.round(Math.abs(x1 - x0) + th), Math.round(Math.abs(y1 - y0) + th), c);
+        for (let d = 0; d < len; d += 10) { const e = Math.min(len, d + 6); g.fill(Math.round(Math.min(x0 + dx * d, x0 + dx * e) - th / 2), Math.round(Math.min(y0 + dy * d, y0 + dy * e) - th / 2), Math.round(Math.abs(dx) * (e - d) + th), Math.round(Math.abs(dy) * (e - d) + th), c); }
+      };
+      let p0, p1;
+      if (horiz) {
+        const d = Math.sign(b.x - a.x) || 1;
+        p0 = { x: ra ? (d > 0 ? ra.x + ra.w : ra.x) : a.x, y: a.y }; p1 = { x: rb ? (d > 0 ? rb.x : rb.x + rb.w) : b.x, y: b.y };
+        const mx = (p0.x + p1.x) / 2; seg(p0.x, p0.y, mx, p0.y); seg(mx, p0.y, mx, p1.y); seg(mx, p1.y, p1.x, p1.y);
+        if (!own) g.fill(Math.round(p1.x - (d > 0 ? 7 : 0)), Math.round(p1.y - 3.5), 7, 7, c, 2);
+      } else {
+        const d = Math.sign(b.y - a.y) || 1;
+        p0 = { x: a.x, y: ra ? (d > 0 ? ra.y + ra.h : ra.y) : a.y }; p1 = { x: b.x, y: rb ? (d > 0 ? rb.y : rb.y + rb.h) : b.y };
+        const my = (p0.y + p1.y) / 2; seg(p0.x, p0.y, p0.x, my); seg(p0.x, my, p1.x, my); seg(p1.x, my, p1.x, p1.y);
+        if (!own) g.fill(Math.round(p1.x - 3.5), Math.round(p1.y - (d > 0 ? 7 : 0)), 7, 7, c, 2);
+      }
+      const lbl = !own && st.emeta?.[n.id]?.label;
+      if (lbl && z >= 0.45) { const s = 11, lw = measure(lbl, s) + 10, mx = (p0.x + p1.x) / 2 - lw / 2, my = (p0.y + p1.y) / 2 - 9; g.fill(mx, my, lw, 18, T.bg, 4); g.text(mx + 5, my + 3, lbl, s, T.dim); }
+    }
+    function minimap(CA) {
+      if (compact || !api.kijo_canvas_node_count()) return;
+      // Everything already in view: a minimap would only cover part of it (Esc frames into the full area).
+      const bb = canvasBounds(api), [ax, ay] = toScreen(api, bb[0], bb[1]), [bx1, by1] = toScreen(api, bb[0] + bb[2], bb[1] + bb[3]);
+      if (ax >= 0 && ay >= 0 && bx1 <= CA.w && by1 <= CA.h) return;
+      const mm = getScene(api, 'minimap'), frame = mm[0]; if (!frame || frame.w <= 0 || frame.h <= 0) return;
+      const k = Math.min(210 / frame.w, 140 / frame.h), bw = Math.round(frame.w * k), bh = Math.round(frame.h * k);
+      const bx = Math.round(CA.x + CA.w - bw - 18), by = Math.round(CA.y + CA.h - bh - 16);
+      if (T.glass) g.glass(bx - 8, by - 8, bw + 16, bh + 16, white, 10, 0.14, 12); else { g.fill(bx - 8, by - 8, bw + 16, bh + 16, A(T.raised, 0.94), 8); g.stroke(bx - 8, by - 8, bw + 16, bh + 16, T.faint, 1, 8); }
+      for (const n of mm.slice(1)) {
+        const x = bx + n.x * k, y = by + n.y * k, w = Math.max(1.5, n.w * k), h = Math.max(1.5, n.h * k);
+        if (n.kind === NODE.VIEWPORT) g.stroke(Math.round(x), Math.round(y), Math.max(4, Math.round(w)), Math.max(4, Math.round(h)), T.blue, 1.5, 2);
+        else if (n.app === APP.GROUP) g.stroke(x, y, w, h, A(T.line, 0.8), 1, 2);
+        else if (n.kind === NODE.GHOST) g.fill(x, y, w, h, A(T.blue, 0.35), 1);
+        else g.fill(x, y, w, h, n.flags & FLAG.SELECTED ? T.ink : n.status ? statusColor(T, n.status) : n.app === APP.NOTE ? A(T.yellow, 0.8) : A(T.ink, 0.45), 1);
+      }
+      hits.push({ kind: 'minimap', x: bx, y: by, w: bw, h: bh, fw: frame.w, fh: frame.h });
+    }
+  }
 }

@@ -110,3 +110,21 @@ need an explicit human action in the host, never an escape sequence.
 - **Embedding a full engine** (three.js, Bevy): another op or a surface with its own pass, scissored to its rectangle, as `scene3d` already is.
 - **Multiple surfaces per tile** (split terminal, tabs): a layout question for the core, not a rendering one.
 - **Depth between tiles** (parallax, z-order experiments): optional, behind the same ops.
+
+## 10. The canvas (view 7, `core/canvas.c`)
+
+Same contract, continuous space. A canvas node is a tile (same 10 fields, same status and ghost rules) plus a world
+rectangle; table order is z-order. Ids start at 1 000 000, so `kijo_status`, `kijo_report`, `kijo_close` and OSC 7501
+address canvas tiles exactly like grid tiles.
+
+- `kijo_build_scene(5)` emits the canvas in **viewport pixels** (the host reports the size with `kijo_canvas_viewport`):
+  groups first, then links, then tiles and ghosts. `material` carries the level of detail the core chose
+  (0 dot, 1 title, 2 full card); renderers draw that level and nothing more. Off-screen nodes are not emitted.
+- `NODE_LINK` (4): `x, y` = centre of `from`, `w, h` = centre of `to`, `owner`/`group` = the two node ids,
+  `material` 1 = edge (stored), 2 = ownership (derived from ghosts, never stored).
+- `kijo_build_scene(6)` is the minimap: a frame node (`NODE_SLOT`, its `w, h` give the aspect), every node, then
+  `NODE_VIEWPORT` (7), all in 0..6000. `kijo_canvas_minimap_to_world` maps a click back.
+- Queries write ids (or coordinates) to the query buffer (`kijo_canvas_qbuf_ptr`) and return a count.
+- Host state stays out of the core, as for the grid: note text, bindings, string ids (`cids`), JSON Canvas extras
+  (`cmeta`, `emeta`) travel beside the core state in schema v2 (`canvas` field). A save without it seeds the demo canvas.
+

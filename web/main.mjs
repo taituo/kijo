@@ -1,7 +1,8 @@
 // Kijo Chrome host. One <canvas>, no DOM UI: every pixel comes from the display list,
 // which comes from the WASM scene. Same ABI, same state schema (localStorage here,
 // ~/.local/state in the terminal host). Input is mapped to the same dispatcher ops.
-import { instantiateCore, getTiles, serializeState, applyState, selectedTile, dispatch, handleKeyName, label, tag, placeTile, APP, DEFAULT_NOTES, DEFAULT_BINDINGS, VIEWS, SIDE } from '../src/core.mjs';
+import { instantiateCore, getTiles, serializeState, applyState, selectedTile, dispatch, handleKeyName, label, tag, placeTile, APP, DEFAULT_NOTES, DEFAULT_BINDINGS, CANVAS_BINDINGS, VIEWS, SIDE, Q16, getCanvasNodes, canvasNode, selectedNode } from '../src/core.mjs';
+import { applyCanvasOp, toJsonCanvas, fromJsonCanvas, isJsonCanvas, canvasQuery, canvasNear, canvasContains, canvasRef, describeNode, toWorld } from '../src/canvas.mjs';
 import { Store, baseName } from '../src/telemetry.mjs';
 import { startBrowserInjector, installInjectors, Sources, injectInto } from './injectors.mjs';
 import { connectDaemon } from './daemon.mjs';
@@ -29,22 +30,31 @@ async function boot() {
   if (!renderer) renderer = createCanvasRenderer(canvas);
 
   let restored = false;
-  const st = { view: 'focus', ghosts: false, notes: { ...DEFAULT_NOTES }, bindings: { ...DEFAULT_BINDINGS }, viz: {}, window: 300000, cam: { manual: false, yaw: 0.6, pitch: 0.5, dist: 2.7 }, events: [], editing: null, palette: null, message: '' };
+  // Host state that travels with the core state: bindings, panel looks, canvas names and JSON Canvas extras.
+  // A layout saved before the canvas existed gets the demo canvas's bindings next to its own.
+  function restoreHostState(j) {
+    const obj = v => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
+    st.bindings = j.bindings ? { ...(j.canvas ? {} : CANVAS_BINDINGS), ...j.bindings } : { ...DEFAULT_BINDINGS };
+    st.viz = obj(j.viz); st.cids = obj(j.cids); st.cmeta = obj(j.cmeta); st.emeta = obj(j.emeta);
+  }
+  const st = { view: 'focus', ghosts: false, notes: { ...DEFAULT_NOTES }, bindings: { ...DEFAULT_BINDINGS }, viz: {}, cids: {}, cmeta: {}, emeta: {}, window: 300000, cam: { manual: false, yaw: 0.6, pitch: 0.5, dist: 2.7 }, events: [], editing: null, palette: null, message: '' };
   // Everything shown by telemetry tiles comes from this store; injectors are the only writers.
   const store = new Store();
   store.onStatus = m => m.id > 0 && api.kijo_report(m.id, m.state, m.kind, m.progress) === 1;
+  // {t:'canvas', op, ...} from any injector (paste, other tabs, kijod relaying an agent) lands here.
+  store.onCanvas = (m, src) => { const r = applyCanvasOp(api, st, m); if (r.ok) { log(`canvas ${m.op} from ${src}${r.id ? ' -> #' + r.id : ''}`); save(); } else say(`canvas ${m.op}: ${r.error}`); return r.ok; };
   const log = e => { st.events.push(`${new Date().toLocaleTimeString('en-GB', { hour12: false })}  ${e}`); if (st.events.length > 200) st.events.shift(); };
   const say = m => { st.message = m; clearTimeout(say.t); say.t = setTimeout(() => (st.message = ''), 3500); };
   if (!params.has('fresh')) {
     try {
       const raw = localStorage.getItem(STORE);
-      if (raw) { const j = JSON.parse(raw); st.notes = applyState(api, j); st.bindings = j.bindings ?? { ...DEFAULT_BINDINGS }; st.viz = j.viz && typeof j.viz === 'object' ? j.viz : {}; if (WINDOWS.includes(j.window)) st.window = j.window; restored = true; log('Restored saved workspace'); }
+      if (raw) { const j = JSON.parse(raw); st.notes = applyState(api, j); restoreHostState(j); if (WINDOWS.includes(j.window)) st.window = j.window; restored = true; log('Restored saved workspace'); }
     }
     catch (err) { console.warn('Ignoring saved state:', err.message); }
   }
-  if (VIEWS.includes(params.get('view'))) st.view = params.get('view');
+  if (VIEWS.includes(params.get('view')) || params.get('view') === 'canvas') st.view = params.get('view');
   let syncTimer = 0, daemon = null;
-  const snapshotState = () => serializeState(api, st.notes, { bindings: st.bindings, viz: st.viz, window: st.window });
+  const snapshotState = () => serializeState(api, st.notes, { bindings: st.bindings, viz: st.viz, window: st.window, cids: st.cids, cmeta: st.cmeta, emeta: st.emeta });
   const save = () => {
     try { localStorage.setItem(STORE, JSON.stringify(snapshotState())); } catch {}
     if (daemon) { clearTimeout(syncTimer); syncTimer = setTimeout(() => daemon?.saveSession(snapshotState()), 800); } // layout follows you to the next device
@@ -71,13 +81,32 @@ async function boot() {
   startBrowserInjector(store, probe);
   installInjectors(store, { notify: say, canPaste: () => !st.editing && !st.palette && !st.capture });
   const sources = new Sources(store, say);
+  // A pasted .canvas file (JSON Canvas) is imported onto the canvas instead of being read as telemetry.
+  addEventListener('paste', e => {
+    if (st.palette || st.editing || st.capture) return;
+    const text = e.clipboardData?.getData('text/plain') || ''; if (!/^\s*\{/.test(text) || !/"nodes"/.test(text)) return;
+    let j; try { j = JSON.parse(text); } catch { return; }
+    if (!isJsonCanvas(j)) return;
+    e.preventDefault(); e.stopImmediatePropagation();
+    try { const r = fromJsonCanvas(api, st, j); st.view = 'canvas'; if (r.ids[0]) { api.kijo_canvas_select(r.ids[0]); api.kijo_canvas_fit(); } say(`imported ${r.nodes} node${r.nodes === 1 ? '' : 's'} and ${r.edges} link${r.edges === 1 ? '' : 's'}`); log(`JSON Canvas: ${r.nodes} nodes, ${r.edges} links`); save(); }
+    catch (err) { say('JSON Canvas: ' + err.message); }
+  }, { capture: true });
+  // Page API for devtools, bookmarklets and extensions:  kijo.canvas.apply({op:'note', text:'hi', near:'@selected'})
+  globalThis.kijo = Object.assign(globalThis.kijo || {}, { canvas: {
+    apply: m => { const r = applyCanvasOp(api, st, m || {}); if (r.ok) save(); return r; },
+    nodes: () => getCanvasNodes(api).map(n => describeNode(api, st, n.id)),
+    query: (x, y, w, h) => canvasQuery(api, x, y, w, h).map(id => describeNode(api, st, id)),
+    near: (ref, k = 5) => { const id = canvasRef(api, st, ref); return id ? canvasNear(api, id, k).map(i => describeNode(api, st, i)) : []; },
+    export: () => toJsonCanvas(api, st),
+    import: doc => { const r = fromJsonCanvas(api, st, doc); save(); return r; },
+  } });
   addEventListener('paste', e => { if (!st.palette) return; const t = (e.clipboardData?.getData('text/plain') || '').split('\n')[0].slice(0, 300); if (t) { st.palette.q += t; refresh(); e.preventDefault(); } });
   const dstate = { state: 'off' };
   function connect(url, token) {
     daemon?.close(); url = url.replace(/\/$/, '');
     try { sessionStorage.setItem('kijo.daemon', JSON.stringify({ url, token })); } catch {}
     let first = true;
-    daemon = connectDaemon({ url, token, store, onState: s => { dstate.state = s; if (s === 'connected' && first) { first = false; log('kijod connected ' + url); if (!restored) daemon.loadSession().then(j => { if (j && j.version === 2) { try { st.notes = applyState(api, j); st.bindings = j.bindings ?? st.bindings; st.viz = j.viz && typeof j.viz === 'object' ? j.viz : st.viz; say('layout loaded from kijod'); } catch {} } }); } if (s === 'unauthorized') say('kijod: wrong token'); }, onInfo: i => { dstate.host = i.host; dstate.shell = i.shell; }, onPty: onPty });
+    daemon = connectDaemon({ url, token, store, onState: s => { dstate.state = s; if (s === 'connected' && first) { first = false; log('kijod connected ' + url); if (!restored) daemon.loadSession().then(j => { if (j && j.version === 2) { try { st.notes = applyState(api, j); restoreHostState(j); say('layout loaded from kijod'); } catch {} } }); } if (s === 'unauthorized') say('kijod: wrong token'); }, onInfo: i => { dstate.host = i.host; dstate.shell = i.shell; }, onPty: onPty });
   }
   function disconnect() { daemon?.close(); daemon = null; dstate.state = 'off'; dstate.shell = false; try { sessionStorage.removeItem('kijo.daemon'); } catch {} }
   // Same-origin relay: kijod prints  http://host:port/#token=...  - read it once, then drop it from the address bar.
@@ -96,7 +125,11 @@ async function boot() {
   };
   function paletteItems(q) {
     const items = [];
-    [...VIEWS, 'flow'].forEach((v, i) => items.push({ title: `View: ${v}`, hint: String(i + 1), run: () => (st.view = v) }));
+    [...VIEWS, 'flow', 'canvas'].forEach((v, i) => items.push({ title: `View: ${v}`, hint: String(i + 1), run: () => (st.view = v) }));
+    items.push({ title: 'Canvas: frame everything', hint: 'esc', run: () => { st.view = 'canvas'; api.kijo_canvas_fit(); } });
+    items.push({ title: 'Canvas: copy as JSON Canvas', hint: 'clipboard', run: () => copyText(JSON.stringify(toJsonCanvas(api, st), null, 2)) });
+    items.push({ title: 'Canvas: paste a .canvas (JSON Canvas) to import it', hint: 'ctrl+v', run: () => { st.view = 'canvas'; say('paste JSON Canvas text now'); } });
+    { const sn = selectedNode(api); if (sn) items.push({ title: 'Canvas: group the selection and its neighbours', hint: 'group', run: () => { const ids = [sn.id, ...canvasNear(api, sn.id, 3)]; const r = applyCanvasOp(api, st, { op: 'group', of: ids, text: 'Group' }); if (r.ok) { st.view = 'canvas'; api.kijo_canvas_select(r.id); } } }); }
     // Telemetry: pin what was injected. Names come from the live store, nothing is hard-coded.
     const pin = (app, name, viz) => { const id = placeTile(api, app); if (!id) return say('No free slot in this workspace'); if (name) st.bindings[id] = name; if (viz) st.viz[id] = viz; st.view = 'focus'; log(`Pinned ${name || tag({ app })} as #${id}`); };
     const groups = [...new Set([...store.series.keys()].map(baseName))].sort();
@@ -128,6 +161,11 @@ async function boot() {
     items.push({ title: 'Toggle scratchpad workspace', hint: 'S', run: () => dispatch(api, 'TOGGLESPECIAL') });
     items.push({ title: 'Show / hide ghost outlines', hint: 'G', run: () => (st.ghosts = !st.ghosts) });
     items.push({ title: 'Reset demo workspace', hint: 'R', run: () => handleKeyName(api, st, 'r') });
+    for (const n of getCanvasNodes(api)) { // canvas tiles are searchable too; choosing one flies there
+      if (n.kind !== 1) continue;
+      const text = (n.app === APP.NOTE || n.app === APP.GROUP ? st.notes[n.id] ?? '' : label(n, st.notes, st.bindings)).replace(/\s+/g, ' ') || tag(n);
+      items.push({ title: text, hint: `${tag(n).toLowerCase()} - canvas`, run: () => { st.view = 'canvas'; api.kijo_canvas_select(n.id); api.kijo_canvas_fly(n.id); }, tile: true });
+    }
     for (let w = 0; w < 10; w++) getTiles(api, w).forEach((t, i) => {
       if (t.kind !== 1) return;
       const text = t.app === APP.NOTE ? (st.notes[t.id] ?? `Note ${t.id}`).replace(/\s+/g, ' ') : label(t, st.notes, st.bindings);
@@ -264,6 +302,12 @@ async function boot() {
     }
     if (ev.altKey) return false;
     if (ev.key === 'e') {
+      if (st.view === 'canvas') { // notes and group labels; the camera brings a small note close enough to read
+        const t = selectedNode(api);
+        if (t && t.kind === 1 && (t.app === APP.NOTE || t.app === APP.GROUP)) { const cur = st.notes[t.id] ?? ''; st.editing = { id: t.id, text: cur === `Note ${t.id}` ? '' : cur }; if (t.app === APP.NOTE && api.kijo_canvas_zoom() * Math.min(t.w, t.h) / Q16 < 140) api.kijo_canvas_fly(t.id); }
+        else say('[E] writes in a note or a group label');
+        return true;
+      }
       const t = selectedTile(api);
       if (t.kind === 1 && t.app === APP.NOTE) { st.view = 'focus'; const cur = st.notes[t.id] ?? ''; st.editing = { id: t.id, text: cur === `Note ${t.id}` ? '' : cur }; } // auto-named notes start blank else say('[E] writes in a note tile');
       return true;
@@ -329,7 +373,38 @@ async function boot() {
     return { tm, x: cx, y: cy, mods: { shift: ev.shiftKey, alt: ev.altKey, ctrl: ev.ctrlKey } };
   };
   const sendMouse = (m, e) => { const b = encodeMouse({ ...e, x: m.x, y: m.y, ...m.mods }, m.tm.vt); if (b) sendTerm(m.tm, b); };
+  // ---- canvas pointer: drag empty space pans, drag a node moves it (a group takes what it contains),
+  // the minimap jumps, wheel zooms at the pointer (trackpad scroll pans, pinch zooms).
+  let cdrag = null, lastList = null;
+  const inCanvas = ev => { const a = lastList?.canvasArea; return a && st.view === 'canvas' && ev.clientX >= a.x && ev.clientX < a.x + a.w && ev.clientY >= a.y && ev.clientY < a.y + a.h ? a : null; };
+  const minimapJump = (h, ev) => { api.kijo_canvas_minimap_to_world(Math.round((ev.clientX - h.x) / h.w * h.fw), Math.round((ev.clientY - h.y) / h.h * h.fh)); const q = new Int32Array(api.memory.buffer, api.kijo_canvas_qbuf_ptr(), 2); api.kijo_canvas_look(q[0], q[1], 0, cdrag?.kind === 'mm' ? 1 : 0); };
+  function canvasDown(ev) {
+    const a = inCanvas(ev); if (!a || st.palette || st.editing) return false;
+    const h = hitAt(ev);
+    if (h && h.kind !== 'cnode' && h.kind !== 'minimap') return false; // bar pills and the like
+    if (h?.kind === 'minimap') { cdrag = { kind: 'mm' }; minimapJump(h, ev); cdrag.h = h; }
+    else if (h?.kind === 'cnode') {
+      const n = canvasNode(api, h.id); api.kijo_canvas_pick(h.id); if (n.app !== APP.GROUP) api.kijo_canvas_raise(h.id);
+      const members = n.app === APP.GROUP ? canvasContains(api, h.id).map(id => canvasNode(api, id)).filter(Boolean) : [];
+      cdrag = { kind: 'node', id: h.id, x0: ev.clientX, y0: ev.clientY, w0: toWorld(api, ev.clientX - a.x, ev.clientY - a.y), nx: n.x, ny: n.y, members, moved: false };
+    } else cdrag = { kind: 'pan', x: ev.clientX, y: ev.clientY, x0: ev.clientX, y0: ev.clientY, moved: false };
+    canvas.setPointerCapture?.(ev.pointerId); save(); return true;
+  }
+  function canvasMove(ev) {
+    if (!cdrag) return false;
+    const a = lastList?.canvasArea || { x: 0, y: 0 };
+    if (cdrag.kind === 'mm') minimapJump(cdrag.h, ev);
+    else if (cdrag.kind === 'pan') { api.kijo_canvas_pan(Math.round(ev.clientX - cdrag.x), Math.round(ev.clientY - cdrag.y)); cdrag.x = Math.round(ev.clientX); cdrag.y = Math.round(ev.clientY); if (Math.hypot(ev.clientX - cdrag.x0, ev.clientY - cdrag.y0) > 3) cdrag.moved = true; }
+    else if (cdrag.moved || Math.hypot(ev.clientX - cdrag.x0, ev.clientY - cdrag.y0) > 3) {
+      cdrag.moved = true; const w1 = toWorld(api, ev.clientX - a.x, ev.clientY - a.y), dx = w1[0] - cdrag.w0[0], dy = w1[1] - cdrag.w0[1];
+      api.kijo_canvas_move(cdrag.id, cdrag.nx + dx, cdrag.ny + dy);
+      for (const m of cdrag.members) api.kijo_canvas_move(m.id, m.x + dx, m.y + dy);
+    }
+    return true;
+  }
+  function canvasUp() { if (!cdrag) return false; if (cdrag.kind === 'pan' && !cdrag.moved) api.kijo_canvas_pick(0); cdrag = null; save(); return true; }
   canvas.addEventListener('pointerdown', ev => {
+    if (canvasDown(ev)) return;
     const tmo = termMouse(ev); if (tmo) { tmDrag = { button: Math.min(2, ev.button) }; tmCell = tmo.x + ',' + tmo.y; sendMouse(tmo, { type: 'down', button: tmDrag.button }); canvas.setPointerCapture?.(ev.pointerId); ev.preventDefault(); return; }
     const h = hitAt(ev); activate(h, false); st.sel = null;
     const tt = h?.kind === 'tile' && st.view === 'focus' && !st.palette && !st.editing ? getTiles(api)[h.meta] : null;
@@ -337,19 +412,35 @@ async function boot() {
     if (h?.kind === 'tile' && getTiles(api)[h.meta]?.app === APP.SCENE3D) { drag = { x: ev.clientX, y: ev.clientY, yaw: st.cam.manual ? st.cam.yaw : st.cam.yaw + (performance.now() - t0) / 1000 * 0.15, pitch: st.cam.pitch }; canvas.setPointerCapture?.(ev.pointerId); }
   });
   canvas.addEventListener('pointermove', ev => {
+    if (canvasMove(ev)) return;
     if (tmDrag || (st.capture && st.terms.get(st.capture)?.vt.mouse === 1003)) { const tmo = termMouse(ev); if (tmo && tmo.x + ',' + tmo.y !== tmCell) { tmCell = tmo.x + ',' + tmo.y; sendMouse(tmo, { type: 'move', button: tmDrag ? tmDrag.button : 3, buttons: tmDrag ? 1 : 0 }); } if (tmDrag) return; }
     if (selDrag && (Math.hypot(ev.clientX - selDrag.ax, ev.clientY - selDrag.ay) > 4 || st.sel)) st.sel = { surf: selDrag.surf, ax: selDrag.ax, ay: selDrag.ay, bx: ev.clientX, by: ev.clientY, key: selDrag.key };
     if (!drag) return; st.cam.manual = true; st.cam.yaw = drag.yaw - (ev.clientX - drag.x) * 0.008; st.cam.pitch = Math.max(0.08, Math.min(1.45, drag.pitch + (ev.clientY - drag.y) * 0.006)); });
   const endDrag = ev => {
+    if (canvasUp()) return;
     if (tmDrag) { const tmo = termMouse(ev || {}) || (() => { const tm = st.terms.get(st.capture), g = termGeo[st.capture]; return tm && g ? { tm, x: 0, y: 0, mods: {} } : null; })(); if (tmo) sendMouse(tmo, { type: 'up', button: tmDrag.button }); tmDrag = null; return; }
     const sd = selDrag; drag = null; selDrag = null; if (st.sel && !lastText) st.sel = null;
     if (sd && !st.sel && st.view === 'focus' && st.terms.has(sd.surf) && getTiles(api).some(t => t.id === sd.surf && t.app === APP.SHELL)) { const tm = st.terms.get(sd.surf); if (tm.exited === null) st.capture = sd.surf; } // a click (not a drag) on a live terminal captures keys
   };
   canvas.addEventListener('pointerup', endDrag); canvas.addEventListener('pointercancel', endDrag);
-  canvas.addEventListener('dblclick', ev => { const h = hitAt(ev); { const ht = h?.kind === 'tile' ? getTiles(api)[h.meta] : null; if (ht?.app === APP.SHELL && st.view === 'focus') { enterTerm(ht); return; } } if (h?.kind === 'tile' && getTiles(api)[h.meta]?.app === APP.SCENE3D) { st.cam.manual = false; return; } activate(h, true); });
-  let wheel = 0;
+  canvas.addEventListener('dblclick', ev => {
+    const a = inCanvas(ev);
+    if (a && !st.palette) { // a node: fly to it, or write in it when it is already close; empty space: a new note right there
+      const h = hitAt(ev);
+      if (h?.kind === 'cnode') { const n = canvasNode(api, h.id), z = api.kijo_canvas_zoom() / Q16; if ((n.app === APP.NOTE || n.app === APP.GROUP) && (n.app === APP.GROUP || Math.min(n.w, n.h) * z >= 120)) act({ key: 'e' }); else api.kijo_canvas_fly(h.id); }
+      else if (!h) { const [x, y] = toWorld(api, ev.clientX - a.x, ev.clientY - a.y), id = api.kijo_canvas_add(APP.NOTE, x - 130, y - 85, 260, 170); if (id) { st.notes[id] = `Note ${id}`; api.kijo_canvas_pick(id); act({ key: 'e' }); } }
+      save(); return;
+    }
+    const h = hitAt(ev); { const ht = h?.kind === 'tile' ? getTiles(api)[h.meta] : null; if (ht?.app === APP.SHELL && st.view === 'focus') { enterTerm(ht); return; } } if (h?.kind === 'tile' && getTiles(api)[h.meta]?.app === APP.SCENE3D) { st.cam.manual = false; return; } activate(h, true); });
+  let wheel = 0, wheelSave = 0;
   canvas.addEventListener('wheel', ev => {
     ev.preventDefault(); if (st.palette) return;
+    { const a = inCanvas(ev); if (a) {
+      const pinch = ev.ctrlKey || ev.metaKey, line = ev.deltaMode === 1 ? 33 : 1;
+      if (!pinch && ev.deltaMode === 0 && (Math.abs(ev.deltaX) > 0.5 || Math.abs(ev.deltaY) < 40)) api.kijo_canvas_pan(Math.round(-ev.deltaX), Math.round(-ev.deltaY)); // trackpad scroll
+      else api.kijo_canvas_zoom_at(Math.round(ev.clientX - a.x), Math.round(ev.clientY - a.y), Math.round(Math.exp(-ev.deltaY * line * (pinch ? 0.01 : 0.0015)) * Q16));
+      clearTimeout(wheelSave); wheelSave = setTimeout(save, 400); return;
+    } }
     { const h = hitAt(ev), ht = h?.kind === 'tile' && st.view === 'focus' ? getTiles(api)[h.meta] : null, tm = ht && st.terms.get(ht.id); // wheel over a terminal scrolls its history
       if (ht?.app === APP.LOGS) { const v = (st.logv[ht.id] ||= { off: 0, q: '', edit: false, n: 0 }); v.off = Math.max(0, v.off + (ev.deltaY < 0 ? 3 : -3)); wheel = 0; return; }
       if (tm && st.capture === ht.id && tm.vt.mouse && !ev.shiftKey) { const tmo = termMouse(ev); if (tmo) sendMouse(tmo, { type: 'wheel', dy: ev.deltaY }); wheel = 0; return; } // the app owns the wheel
@@ -383,7 +474,7 @@ async function boot() {
     metrics.cpu = c0 && wall - c0.ts < 15000 ? Math.round(c0.v) : undefined; metrics.ram = r0 && wall - r0.ts < 15000 ? Math.round(r0.v) : undefined;
     env.store = store; env.now = wall; env.daemon = dstate.state === 'off' ? null : dstate;
     const p0 = performance.now();
-    const list = buildDisplayList(api, st, env);
+    const list = buildDisplayList(api, st, env); lastList = list;
     hits = list.hits; lastText = list.selectionText || '';
     termGeo = list.termSizes || {}; syncTerms(termGeo, now);
     for (const id in list.logInfo || {}) { const v = st.logv[id], i = list.logInfo[id]; logRows[id] = i.rows; if (!v) continue; if (v.off > 0) v.off += i.shown - (v.n ?? i.shown); v.n = i.shown; v.off = clampI(v.off, 0, Math.max(0, i.shown - i.rows)); } // scrolled-back view stays put while new lines arrive
@@ -395,7 +486,7 @@ async function boot() {
     if (st.sel && st.sel.key !== selKey()) { st.sel = null; lastText = ''; }
     renderer.draw(list, env);
     drawAcc += performance.now() - p0; drawN++; lastCmds = list.cmds.length;
-    globalThis.__kijo = { api, st, store, anim, act, sources, connect, tiles: w => getTiles(api, w), selectedText: () => lastText, renderer: renderer.name, rendererObj: renderer, termGeo: () => termGeo, term: () => [...st.terms.values()].map(t => ({ tile: t.tile, id: t.id, text: t.vt.text(), cols: t.vt.cols, rows: t.vt.rows, exited: t.exited, title: t.title })), frames: (globalThis.__kijo?.frames || 0) + 1 };
+    globalThis.__kijo = { api, st, store, anim, act, sources, connect, tiles: w => getTiles(api, w), selectedText: () => lastText, renderer: renderer.name, rendererObj: renderer, termGeo: () => termGeo, area: () => lastList?.canvasArea ?? null, hits: () => hits, hitAt: (x, y) => hitAt({ clientX: x, clientY: y }), term: () => [...st.terms.values()].map(t => ({ tile: t.tile, id: t.id, text: t.vt.text(), cols: t.vt.cols, rows: t.vt.rows, exited: t.exited, title: t.title })), frames: (globalThis.__kijo?.frames || 0) + 1 };
     requestAnimationFrame(frame);
   }
   log(`Kijo started / ${renderer.name}${renderer.gpu !== 'none' ? ' / ' + renderer.gpu : ''}`);

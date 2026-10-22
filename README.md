@@ -140,7 +140,7 @@ test/    unit, drawing, daemon (incl. real PTY) and real-Chrome E2E tests      d
 ## Run
 
 ```sh
-npm test                           # core fuzz + telemetry + drawing + VT + text selection + relay, no dependencies
+npm test                           # core fuzz + canvas + telemetry + drawing + VT + text selection + relay, no dependencies
 npm run e2e                        # real Chrome (KIJO_CHROME=...; needs playwright): UI, and a real PTY through kijod
 node src/host.mjs                  # terminal host (works over SSH, no X11/Wayland)
 node src/serve.mjs                 # Chrome host at http://127.0.0.1:7501/
@@ -205,13 +205,54 @@ limit is that glass shows the wallpaper, not other tiles behind it. Canvas2D get
 - **Status vocabulary matches OSC 7501**: `idle · working · blocked(permission|question|auth) ·
   error · done`, plus `progress`. `kijo_report(id, state, kind, progress)` is the entry point a
   future adapter feeds. The bar and workspace pills surface the most urgent state per workspace.
-- **Views** (`1`-`6`): focus (2x2), overview (6x6 heatmap), wiring, timeline, workspaces, flow.
+- **Views** (`1`-`7`): focus (2x2), overview (6x6 heatmap), wiring, timeline, workspaces, flow, canvas (below).
   `Esc`/`Enter` and the wheel zoom between them; tiles glide between rectangles.
 - **Square cells.** Focus and overview map the grid into the largest centred square, so a 1x1 tile is a square and a
   2x2 footprint is a bigger square. `Z` zooms the selected tile to the whole area (a terminal or a wide chart); `Esc` or `Z` goes back,
   arrows pick the next tile. Phones always show the selected tile full size.
 - **Search** (`/` or `Ctrl+K`): one palette over commands, workspaces and every note/tile.
 - **Notes**: `N` makes a note, `F` reserves a 2x2 footprint, `E` writes text (`Esc` saves).
+
+## Canvas (view 7): the same tiles in continuous space
+
+The 6x6 grid is one layout. View `7` puts the same kind of tiles, ghosts and status on an **unbounded 2D canvas**
+owned by the same WASM core (`core/canvas.c`, compiled into the same module). The grid views are unchanged.
+
+- **The core decides what is drawn where**: camera (centre + zoom, eased flights), culling, screen rectangles and a
+  **semantic zoom** level per node (full card, title only, dot). Hosts draw; they never compute layout. All camera math
+  is integer, so a native host running the same bytes agrees to the pixel.
+- **Spatial queries for agents**: what intersects a rectangle, what a group contains, the k nearest nodes, free room
+  next to a node in a direction (keeping a gap), the node at a point, the bounds of everything.
+- **Ghosts in space**: an agent reserves room for output that does not exist yet (`reserve`), fills it later with
+  the same id (`fill`), and closing the owner removes exactly the reservations it still owns, as on the grid.
+- **Navigation**: drag empty space pans, wheel/pinch zooms about the pointer, drag moves a node (a group carries what it
+  contains), double-click writes a new note, arrows walk to the nearest node in that direction, `Enter` flies to it,
+  `Esc` frames everything. A minimap appears once something is off screen; a click there jumps.
+- **Keys** keep their grid meaning: `N` note (or fill the selected reservation), `F` reserve room owned by the selection,
+  `L` then `L` links two nodes, `E` writes, `T` cycles status, `X` closes, `Shift+arrows` nudge, `+`/`-` zoom.
+- **JSON Canvas 1.0** ([jsoncanvas.org](https://jsoncanvas.org), Obsidian's open format): paste a `.canvas` document to
+  import it beside what is there, palette `Canvas: copy as JSON Canvas` to export. Kijo tiles that are not notes export
+  as text nodes with a `kijo` field (app, bound series).
+
+**Agents** use the same verbs from anywhere an injector reaches: `{t:'canvas', op, ...}` posted to kijod, pasted as
+NDJSON, sent from another tab, or `kijo.canvas.apply(...)` in the page. String ids make retries idempotent.
+
+```sh
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:7501/ingest --data-binary @- <<'EOF'
+{"t":"canvas","op":"add","id":"agent-1","app":"agent","near":"@selected","dir":"right"}
+{"t":"canvas","op":"reserve","id":"out","owner":"agent-1","dir":"down"}
+{"t":"canvas","op":"status","id":"agent-1","state":"working","progress":40}
+{"t":"canvas","op":"fill","id":"out","app":"note","text":"p95 doubles after deploy 41"}
+{"t":"canvas","op":"link","from":"agent-1","to":"out","label":"wrote"}
+EOF
+```
+
+Ops: `note`/`add` (`app`, `text`, `x,y` or `near`+`dir`, `w,h`, `series`), `reserve`, `fill`, `text`, `status`, `move`,
+`link`/`unlink`, `group` (`of: [ids]`), `close`, `select`, `fly`, `fit`. kijod checks the shape and forwards; the page's
+core applies it. In the page: `kijo.canvas.nodes()`, `.query(x, y, w, h)`, `.near(id)`, `.export()`, `.import(doc)`.
+
+Not built yet: the canvas lives in each page's core, so two browsers on one kijod each apply the same ops to their own copy
+(a CRDT document shared through kijod is the next step); no undo; connectors are orthogonal (the op set has no lines).
 
 ## ABI v2 (core/scene.c)
 
@@ -234,6 +275,9 @@ there is no synthetic data in the app (tests use fixtures, labelled as such).
 
 Also real since 0.5: selectable/copyable text on every text surface, the VT emulator, PTY-backed terminal tiles
 through kijod (opt-in), OSC 7501 parsed from the PTY stream into tile status.
+
+Also real on the `canvas` branch: the canvas core (camera, semantic zoom, spatial queries, reservations; fuzz-tested), agent
+ops through every injector and kijod, JSON Canvas import/export, persistence in schema v2, terminal and Chrome hosts (real-Chrome E2E).
 
 Not built yet, and labelled as such in the UI: SSH/Herdr attach, OTLP/protobuf, agent execution.
 The agent tile is a local simulation. The terminal host's `P`/`O` still take over the terminal for a real shell/SSH session.

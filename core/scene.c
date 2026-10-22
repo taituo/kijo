@@ -6,11 +6,12 @@
 //
 // Model: Hyprland-style workspaces and dispatchers over a stable 6x6 slot grid.
 // Ghost tiles reserve slots so neighbours never auto-expand (see kijo_spawn / kijo_close).
+// The same tiles can also live on an unbounded canvas in continuous space: see canvas.c.
 #define SIDE 6
 #define CELLS 36
 #define NWS 10            // 0..8 = workspaces 1..9, 9 = special (scratchpad)
 #define SPECIAL_WS 9
-#define CAPACITY 192
+#define CAPACITY 1280     // emitted scene nodes per build (the canvas can show hundreds)
 #define SCALE 6000        // scene coordinate space: 6000 x 6000 (1 slot = 1000)
 #define EVENTS 64
 
@@ -19,8 +20,9 @@ enum { EMPTY = 0, REAL = 1, GHOST = 2 };
 enum { IDLE = 0, WORKING = 1, BLOCKED = 2, ERROR = 3, COMPLETE = 4 };
 enum { BK_NONE = 0, BK_PERMISSION = 1, BK_QUESTION = 2, BK_AUTH = 3 };
 enum { APP_NONE = 0, APP_SHELL = 1, APP_AGENT = 2, APP_METRICS = 3, APP_REMOTE = 4, APP_NOTE = 5, APP_HERDR = 6,
-       APP_SYS = 7, APP_SERIES = 8, APP_LOGS = 9, APP_TRACES = 10, APP_SCENE3D = 11, APP_MAX = 11 };
-enum { VIEW_FOCUS = 0, VIEW_OVERVIEW = 1, VIEW_BACK = 2, VIEW_TIMELINE = 3, VIEW_WORKSPACES = 4 };
+       APP_SYS = 7, APP_SERIES = 8, APP_LOGS = 9, APP_TRACES = 10, APP_SCENE3D = 11, APP_MAX = 11,
+       APP_GROUP = 12, CANVAS_APP_MAX = 12 };   // a group is a canvas region; the grid never spawns one
+enum { VIEW_FOCUS = 0, VIEW_OVERVIEW = 1, VIEW_BACK = 2, VIEW_TIMELINE = 3, VIEW_WORKSPACES = 4, VIEW_CANVAS = 5, VIEW_MINIMAP = 6 };
 enum { NODE_SLOT = 1, NODE_TILE = 2, NODE_GHOST = 3, NODE_LINK = 4, NODE_EVENT = 5, NODE_WORKSPACE = 6 };
 enum { FLAG_SELECTED = 1, FLAG_IN_VIEWPORT = 2, FLAG_ACTIVE_WS = 4 };
 enum { OP_MOVEFOCUS = 1, OP_WORKSPACE = 2, OP_MOVETOWORKSPACE = 3, OP_KILLACTIVE = 4,
@@ -45,6 +47,15 @@ static Event events[EVENTS];
 static int32_t node_count = 0, event_total = 0;
 static int32_t sel_x[NWS], sel_y[NWS], view_x[NWS], view_y[NWS];
 static int32_t cur_ws = 0, special_open = 0, next_id = 100, transaction_id = 1;
+
+// canvas.c (included at the end of this file)
+static void canvas_clear(void);
+static Tile *canvas_tile(int32_t id);
+static void build_canvas(void);
+static void build_minimap(void);
+void kijo_canvas_seed(void);
+int32_t kijo_canvas_close(int32_t id);
+#define CANVAS_ID0 1000000
 
 // -nostdlib: the compiler lowers struct zeroing to memset, so provide it (and stop it recursing).
 __attribute__((used, optnone, no_builtin("memset")))
@@ -89,6 +100,7 @@ void kijo_clear(void) {
     }
     cur_ws = 0; special_open = 0; node_count = 0; event_total = 0;
     transaction_id = 1; next_id = 100;
+    canvas_clear();
 }
 
 __attribute__((export_name("kijo_reset")))
@@ -128,6 +140,7 @@ void kijo_reset(void) {
     put(4,1,2,20,REAL,IDLE,0,20,++transaction_id,APP_SERIES);
     put(4,2,2,21,REAL,IDLE,0,21,++transaction_id,APP_SERIES);
     sel_x[4] = 1; sel_y[4] = 1; view_x[4] = 1; view_y[4] = 1;
+    kijo_canvas_seed();
     log_event(EV_RESET, 0, 0, 0);
 }
 
@@ -159,9 +172,11 @@ void kijo_select(int32_t x, int32_t y) {
 
 static Tile *selected(void) { return &tiles[active()][sel_y[active()] * SIDE + sel_x[active()]]; }
 
+// Grid tiles first; canvas tiles share the status vocabulary and the id space (ws_out = -1 for them).
 static Tile *find_real(int32_t id, int32_t *ws_out) {
     for (int w = 0; w < NWS; w++) for (int i = 0; i < CELLS; i++)
         if (tiles[w][i].kind == REAL && tiles[w][i].id == id) { if (ws_out) *ws_out = w; return &tiles[w][i]; }
+    if (id >= CANVAS_ID0) { if (ws_out) *ws_out = -1; return canvas_tile(id); }
     return 0;
 }
 
@@ -208,6 +223,7 @@ static void cascade(int32_t ws, int32_t id, int32_t group, int32_t tx) {
 
 __attribute__((export_name("kijo_close")))
 int32_t kijo_close(int32_t id) {
+    if (id >= CANVAS_ID0) return kijo_canvas_close(id);
     int32_t ws = 0;
     Tile *t = find_real(id, &ws);
     if (!t) return 0;
@@ -380,6 +396,9 @@ int32_t kijo_build_scene(int32_t view) {
             emit(NODE_WORKSPACE, reals, (w % 3) * 2000, (w / 3) * 2000, 2000, 2000, best, 0, ghosts,
                  (w == cur_ws ? FLAG_ACTIVE_WS | FLAG_SELECTED : 0), 1, best == WORKING ? 1 : 0, w, 0, prog);
         }
-    }
+    } else if (view == VIEW_CANVAS) build_canvas();
+    else if (view == VIEW_MINIMAP) build_minimap();
     return node_count;
 }
+
+#include "canvas.c"

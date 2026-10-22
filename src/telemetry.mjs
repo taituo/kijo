@@ -101,6 +101,11 @@ export class Store {
         this.touch(s, via, 'status');
         return !!this.onStatus?.({ id: num(m.id), state, kind: KIND_NAMES[m.kind] || 0, progress: Number.isFinite(num(m.progress)) ? num(m.progress) : -1, src: s });
       }
+      case 'canvas': { // spatial ops for agents (src/canvas.mjs applies them to the core; a relay only forwards)
+        if (!canvasOk(m)) { this.dropped++; return false; }
+        this.touch(s, via, 'canvas');
+        return !!this.onCanvas?.(m, s);
+      }
     }
     this.dropped++; return false;
   }
@@ -178,6 +183,17 @@ export function parseText(text) {
     if (m) out.push(m);
   }
   return out;
+}
+
+// Shape check for {t:'canvas', op, ...} messages, shared by the page and the relay. Bounded, no nesting surprises.
+export const CANVAS_OPS = ['add', 'note', 'reserve', 'fill', 'text', 'status', 'move', 'link', 'unlink', 'close', 'select', 'fly', 'fit', 'group'];
+export function canvasOk(m) {
+  if (!m || typeof m !== 'object' || !CANVAS_OPS.includes(m.op)) return false;
+  const refOk = v => v === undefined || (typeof v === 'string' && v.length <= 64) || Number.isInteger(v);
+  if (![m.id, m.near, m.owner, m.from, m.to].every(refOk)) return false;
+  if (m.text !== undefined && (typeof m.text !== 'string' || m.text.length > 4000)) return false;
+  if (m.of !== undefined && (!Array.isArray(m.of) || m.of.length > 256 || !m.of.every(refOk))) return false;
+  return JSON.stringify(m).length <= 8192;
 }
 
 export function normalizeJson(j) {

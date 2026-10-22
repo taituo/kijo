@@ -22,7 +22,7 @@ import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
-import { Store, parseText, normalizeJson, otlp } from './telemetry.mjs';
+import { Store, parseText, normalizeJson, otlp, canvasOk } from './telemetry.mjs';
 
 const VERSION = '0.5.0';
 const BODY_LIMIT = 1_000_000, BATCH_LIMIT = 5000, MAX_CLIENTS = 16, MAX_PTYS = 4, PTY_IN_LIMIT = 65_536, PTY_REPLAY = 65_536;
@@ -84,7 +84,9 @@ export async function startDaemon({ port = 7501, host = '127.0.0.1', token = pro
 
   // ---- emit: the one path every message takes (store for late joiners, queue for live clients)
   function emit(msg, src, via = 'kijod') {
-    if (msg.t === 'status') store.touch(src, via, 'status'); else if (!store.ingest({ ...msg, ts: msg.ts ?? Date.now() }, { src, via })) return false;
+    if (msg.t === 'status') store.touch(src, via, 'status');
+    else if (msg.t === 'canvas') { if (!canvasOk(msg)) return false; store.touch(src, via, 'canvas'); } // forwarded; the canvas lives in the page's core
+    else if (!store.ingest({ ...msg, ts: msg.ts ?? Date.now() }, { src, via })) return false;
     queue.push({ ...msg, ts: msg.ts ?? Date.now(), src: msg.src || src });
     ingested++;
     flushTimer ??= setTimeout(flush, 250);
